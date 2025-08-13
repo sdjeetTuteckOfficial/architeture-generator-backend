@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
+langchain-google-genai
+langgraph
+langchain-core
+langchain
+google-generativeai
+python-dotenv
+typing-extensions
+annotated-types
