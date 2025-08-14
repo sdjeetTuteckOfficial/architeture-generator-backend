@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, List, Optional, Any, TypedDict, Annotated
+from typing import Dict, List, Optional, Any, TypedDict, Annotated, Union
 import os
 import json
 import re
@@ -16,7 +16,7 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.tools import tool
 from langchain_core.prompts import ChatPromptTemplate
-
+from constants.constants import AWS_AVAILABLE_IMAGES, AZURE_AVAILABLE_IMAGES, local_images
 from dotenv import load_dotenv
 
 load_dotenv()  # take environment variables
@@ -29,10 +29,12 @@ os.environ["GOOGLE_API_KEY"] = google_api_key
 
 app = FastAPI(title="Dynamic Architecture Generator API", version="1.0.0")
 
+imageList = AWS_AVAILABLE_IMAGES + AZURE_AVAILABLE_IMAGES + local_images
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:3000"],  # React dev server
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:3000", "http://localhost:5174"],  # React dev server
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,10 +51,37 @@ class AnalysisResponse(BaseModel):
     clarification_questions: List[str]
     extracted_context: Dict[str, Any]
 
-# New Pydantic model to correctly handle the request body for /generate-architecture
+# ReactFlow specific models
+
+class ReactFlowNodeData(BaseModel):
+    label: str
+    image: Optional[str] = None
+class ReactFlowNode(BaseModel):
+    id: str
+    data: ReactFlowNodeData
+    position: Dict[str, float]
+    type: Optional[str] = "custom" # Use a default type to keep it simple
+
+class ReactFlowEdge(BaseModel):
+    id: str
+    source: str
+    target: str
+
+class ReactFlowDiagramResponse(BaseModel):
+    nodes: List[ReactFlowNode]
+    edges: List[ReactFlowEdge]
+    metadata: Dict[str, Any]
+
+# Updated request models
 class ArchitectureRequest(BaseModel):
     description: str
-    context: Dict[str, Any]
+    context: Optional[Dict[str, Any]] = {}
+    clarification_responses: Optional[Dict[str, str]] = None
+    diagram_type: str = "architecture"  # "architecture" or "database"
+
+class DatabaseRequest(BaseModel):
+    description: str
+    context: Optional[Dict[str, Any]] = {}
     clarification_responses: Optional[Dict[str, str]] = None
 
 class ArchitectureResponse(BaseModel):
@@ -228,19 +257,340 @@ def generate_dynamic_questions(context: Dict[str, Any], completeness_score: floa
             "Do you have any technology preferences or constraints?"
         ]
 
+# @tool
+# def generate_reactflow_architecture(description: str, context: Dict[str, Any], user_responses: Dict[str, str]) -> Dict[str, Any]:
+#     """Generate ReactFlow architecture diagram data"""
+    
+#     architecture_prompt = f"""
+#     You are an expert software architect. Generate a ReactFlow diagram for the following project.
+    
+#     ORIGINAL REQUEST: {description}
+#     CONTEXT: {json.dumps(context, indent=2)}
+#     USER RESPONSES: {json.dumps(user_responses, indent=2)}
+    
+#     Create a ReactFlow diagram with nodes and edges. Return ONLY valid JSON in this exact format:
+    
+#     {{
+#         "nodes": [
+#             {{
+#                 "id": "unique_id",
+#                 "type": "custom",
+#                 "position": {{"x": 100, "y": 100}},
+#                 "data": {{
+#                     "label": "Component Name",
+#                     "description": "Component description",
+#                     "technology": "React, Node.js, etc.",
+#                     "type": "frontend/backend/database/external"
+#                 }},
+#                 "style": {{
+#                     "width": 180,
+#                     "height": 120,
+#                     "backgroundColor": "#ffffff",
+#                     "border": "2px solid #3b82f6",
+#                     "borderRadius": 8
+#                 }}
+#             }}
+#         ],
+#         "edges": [
+#             {{
+#                 "id": "edge_id",
+#                 "source": "source_node_id",
+#                 "target": "target_node_id",
+#                 "type": "smoothstep",
+#                 "animated": true,
+#                 "label": "API calls",
+#                 "style": {{
+#                     "stroke": "#6366f1",
+#                     "strokeWidth": 2
+#                 }}
+#             }}
+#         ]
+#     }}
+    
+#     Guidelines:
+#     - Create 4-8 meaningful nodes representing system components
+#     - Position nodes in a logical layout (x: 0-800, y: 0-600)
+#     - Use different colors for different component types:
+#       * Frontend: #3b82f6 (blue)
+#       * Backend: #10b981 (green)
+#       * Database: #8b5cf6 (purple)
+#       * External: #f59e0b (orange)
+#     - Connect related components with edges
+#     - Make labels descriptive and specific to the project
+#     """
+    
+#     try:
+#         response = llm.invoke([HumanMessage(content=architecture_prompt)])
+#         content = response.content
+        
+#         # Extract JSON from response
+#         json_match = re.search(r'\{.*\}', content, re.DOTALL)
+#         if json_match:
+#             diagram_data = json.loads(json_match.group())
+#             return diagram_data
+#         else:
+#             raise ValueError("No valid JSON found in response")
+#     except Exception as e:
+#         print(f"Error generating ReactFlow architecture: {e}")
+#         # Return default architecture
+#         return {
+#             "nodes": [
+#                 {
+#                     "id": "frontend",
+#                     "type": "custom",
+#                     "position": {"x": 100, "y": 100},
+#                     "data": {
+#                         "label": "Frontend App",
+#                         "description": "User interface",
+#                         "technology": "React/Vue/Angular",
+#                         "type": "frontend"
+#                     },
+#                     "style": {
+#                         "width": 180,
+#                         "height": 120,
+#                         "backgroundColor": "#ffffff",
+#                         "border": "2px solid #3b82f6",
+#                         "borderRadius": 8
+#                     }
+#                 },
+#                 {
+#                     "id": "backend",
+#                     "type": "custom", 
+#                     "position": {"x": 400, "y": 100},
+#                     "data": {
+#                         "label": "Backend API",
+#                         "description": "Business logic",
+#                         "technology": "Node.js/Python/Java",
+#                         "type": "backend"
+#                     },
+#                     "style": {
+#                         "width": 180,
+#                         "height": 120,
+#                         "backgroundColor": "#ffffff", 
+#                         "border": "2px solid #10b981",
+#                         "borderRadius": 8
+#                     }
+#                 },
+#                 {
+#                     "id": "database",
+#                     "type": "custom",
+#                     "position": {"x": 400, "y": 300},
+#                     "data": {
+#                         "label": "Database",
+#                         "description": "Data storage",
+#                         "technology": "PostgreSQL/MongoDB",
+#                         "type": "database"
+#                     },
+#                     "style": {
+#                         "width": 180,
+#                         "height": 120,
+#                         "backgroundColor": "#ffffff",
+#                         "border": "2px solid #8b5cf6", 
+#                         "borderRadius": 8
+#                     }
+#                 }
+#             ],
+#             "edges": [
+#                 {
+#                     "id": "frontend-backend",
+#                     "source": "frontend",
+#                     "target": "backend", 
+#                     "type": "smoothstep",
+#                     "animated": True,
+#                     "label": "API calls",
+#                     "style": {"stroke": "#6366f1", "strokeWidth": 2}
+#                 },
+#                 {
+#                     "id": "backend-database",
+#                     "source": "backend",
+#                     "target": "database",
+#                     "type": "smoothstep", 
+#                     "animated": True,
+#                     "label": "queries",
+#                     "style": {"stroke": "#6366f1", "strokeWidth": 2}
+#                 }
+#             ]
+#         }
+@tool
+def generate_reactflow_architecture(description: str, context: Dict[str, Any], user_responses: Dict[str, str]) -> Dict[str, Any]:
+    """Generate ReactFlow architecture diagram data"""
+    print("Generating ReactFlow architecture diagram...")
+   
+
+    # Construct the new prompt
+    architecture_prompt = f"""
+    You are an assistant that returns React Flow-compatible architecture diagrams in JSON.
+
+    Your task is to analyze the provided project description and generate a complete and valid JSON object for a React Flow diagram.
+
+    The JSON **must** strictly adhere to the following schema:
+    {{
+        "nodes": [
+            {{
+                "id": "unique_id",
+                "type": "custom",
+                "data": {{ "label": "Component Name", "image": "image_name.png" (optional) }},
+                "position": {{ "x": 0, "y": 0 }}
+            }}
+        ],
+        "edges": [
+            {{
+                "id": "unique_edge_id",
+                "source": "source_node_id",
+                "target": "target_node_id"
+            }}
+        ]
+    }}
+
+    **IMPORTANT RULES:**
+    1.  Nodes must be placed in a logical layout. The 'position' x and y values should be within a reasonable range (e.g., 0-800 for x, 0-600 for y) to avoid overlapping.
+    2.  Use the `data.image` field to assign an icon to a node. You can only use the following image names:
+        {imageList}
+    3.  If a component is not represented by an image in the list, omit the `data.image` field entirely. Do not invent image names.
+    4.  Do not create a node for the user prompt itself. Only create nodes for the architectural components.
+    5.  Return ONLY the raw JSON object. Do not include any surrounding markdown (like ```json) or explanatory text.
+
+    Now, generate the architecture diagram JSON for the following project description:
+    "{description}"
+    """
+
+    try:
+        response = llm.invoke([HumanMessage(content=architecture_prompt)])
+        content = response.content
+
+        # Robustly extract JSON from the response
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+        if json_match:
+            diagram_data = json.loads(json_match.group())
+            return diagram_data
+        else:
+            raise ValueError("No valid JSON found in response")
+    except Exception as e:
+        print(f"Error generating ReactFlow architecture: {e}")
+        # Return default architecture to ensure stability
+        return {
+            "nodes": [{"id": "default", "data": {"label": "Error: Could not generate diagram."}, "position": {"x": 100, "y": 100}}],
+            "edges": []
+        }
+@tool
+def generate_reactflow_database(description: str, context: Dict[str, Any], user_responses: Dict[str, str]) -> Dict[str, Any]:
+    """Generate ReactFlow database diagram data"""
+    
+    database_prompt = f"""
+    You are an expert database architect. Generate a ReactFlow database diagram for the following project.
+    
+    ORIGINAL REQUEST: {description}
+    CONTEXT: {json.dumps(context, indent=2)}
+    USER RESPONSES: {json.dumps(user_responses, indent=2)}
+    
+    Create a database diagram with tables and relationships. Return ONLY valid JSON in this exact format:
+    
+    {{
+        "nodes": [
+            {{
+                "id": "table_name",
+                "type": "dbTableNode",
+                "position": {{"x": 100, "y": 100}},
+                "data": {{
+                    "tableName": "users",
+                    "columns": [
+                        {{
+                            "name": "id",
+                            "type": "INTEGER",
+                            "isPrimary": true,
+                            "isNullable": false,
+                            "isUnique": true
+                        }},
+                        {{
+                            "name": "email",
+                            "type": "VARCHAR(255)",
+                            "isPrimary": false,
+                            "isNullable": false,
+                            "isUnique": true
+                        }}
+                    ],
+                    "description": "User accounts table"
+                }},
+                "style": {{
+                    "width": 250,
+                    "minHeight": 150,
+                    "backgroundColor": "#ffffff",
+                    "border": "2px solid #8b5cf6",
+                    "borderRadius": 8
+                }}
+            }}
+        ],
+        "edges": [
+            {{
+                "id": "relationship_id",
+                "source": "source_table",
+                "target": "target_table",
+                "type": "straight",
+                "label": "FK",
+                "style": {{
+                    "stroke": "#8b5cf6",
+                    "strokeWidth": 2
+                }}
+            }}
+        ]
+    }}
+    
+    Guidelines:
+    - Create 3-6 tables based on the project requirements
+    - Each table should have realistic columns with proper data types
+    - Include primary keys, foreign keys, and common fields
+    - Position tables in a logical layout
+    - Connect related tables with foreign key relationships
+    - Use descriptive table and column names
+    """
+    
+    try:
+        response = llm.invoke([HumanMessage(content=database_prompt)])
+        content = response.content
+        
+        # Extract JSON from response
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+        if json_match:
+            diagram_data = json.loads(json_match.group())
+            return diagram_data
+        else:
+            raise ValueError("No valid JSON found in response")
+    except Exception as e:
+        print(f"Error generating ReactFlow database: {e}")
+        # Return default database schema
+        return {
+            "nodes": [
+                {
+                    "id": "users",
+                    "type": "dbTableNode",
+                    "position": {"x": 100, "y": 100},
+                    "data": {
+                        "tableName": "users",
+                        "columns": [
+                            {"name": "id", "type": "INTEGER", "isPrimary": True, "isNullable": False, "isUnique": True},
+                            {"name": "email", "type": "VARCHAR(255)", "isPrimary": False, "isNullable": False, "isUnique": True},
+                            {"name": "password", "type": "VARCHAR(255)", "isPrimary": False, "isNullable": False, "isUnique": False},
+                            {"name": "created_at", "type": "TIMESTAMP", "isPrimary": False, "isNullable": False, "isUnique": False}
+                        ],
+                        "description": "User accounts"
+                    },
+                    "style": {"width": 250, "minHeight": 150, "backgroundColor": "#ffffff", "border": "2px solid #8b5cf6", "borderRadius": 8}
+                }
+            ],
+            "edges": []
+        }
+
 # API Routes
 @app.post("/analyze", response_model=AnalysisResponse)
 async def analyze_project(request: ProjectRequest):
     """Analyze project description and return initial assessment"""
     try:
-        # Corrected tool invocation
         context = analyze_prompt_context.invoke({'prompt': request.description})
         completeness_score = calculate_completeness_score.invoke({'context': context})
         needs_clarification = completeness_score < 0.6
         
         clarification_questions = []
         if needs_clarification:
-            # Corrected tool invocation
             clarification_questions = generate_dynamic_questions.invoke({'context': context, 'completeness_score': completeness_score})
         
         return AnalysisResponse(
@@ -253,11 +603,41 @@ async def analyze_project(request: ProjectRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error analyzing project: {str(e)}")
 
+@app.post("/generate-diagram", response_model=ReactFlowDiagramResponse)
+async def generate_diagram(request: ArchitectureRequest):
+    """Generate ReactFlow diagram based on description and type"""
+    try:
+        user_responses = request.clarification_responses or {}
+        
+        if request.diagram_type == "database":
+            diagram_data = generate_reactflow_database.invoke({
+                'description': request.description,
+                'context': request.context,
+                'user_responses': user_responses
+            })
+        else:
+            diagram_data = generate_reactflow_architecture.invoke({
+                'description': request.description, 
+                'context': request.context,
+                'user_responses': user_responses
+            })
+        
+        return ReactFlowDiagramResponse(
+            nodes=[ReactFlowNode(**node) for node in diagram_data["nodes"]],
+            edges=[ReactFlowEdge(**edge) for edge in diagram_data["edges"]],
+            metadata={
+                "diagram_type": request.diagram_type,
+                "domain": request.context.get("project_domain", "general system"),
+                "timestamp": datetime.now().isoformat(),
+                "description": request.description
+            }
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating diagram: {str(e)}")
+
 @app.post("/generate-architecture", response_model=ArchitectureResponse)
-async def generate_architecture(
-    request: ArchitectureRequest # Changed from individual parameters to a Pydantic model
-):
-    """Generate detailed architecture based on description and clarifications"""
+async def generate_architecture(request: ArchitectureRequest):
+    """Generate detailed text architecture (legacy endpoint)"""
     try:
         domain = request.context.get("project_domain", "general system")
         user_responses = request.clarification_responses or {}
