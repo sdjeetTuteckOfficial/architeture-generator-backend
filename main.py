@@ -6,6 +6,7 @@ import os
 import json
 import re
 from datetime import datetime
+from typing import Union
 import uvicorn
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
@@ -61,10 +62,37 @@ class ReactFlowEdge(BaseModel):
     target: str
     label: Optional[str] = None
     type: str = "default"
+    
+class DBTableField(BaseModel):
+    name: str
+    type: str
+    primaryKey: bool = False
+    foreignKey: bool = False
+    references: Optional[str] = None
+    unique: Optional[bool] = None
+    
+class DBTableNodeData(BaseModel):
+    label: str
+    fields: List[DBTableField]
+    
+class DBTableNode(BaseModel):
+    id: str
+    data: DBTableNodeData
+    position: Dict[str, float]
+    
+class DBEdge(BaseModel):
+    id: str
+    source: str
+    target: str
+    type: str = "smoothstep"
+    animated: bool = True
+    markerEnd: Dict[str, str] = {"type": "arrowclosed"}
+    
+NodeTypes = Union[ReactFlowNode, DBTableNode]
 
 class DiagramResponse(BaseModel):
-    nodes: List[ReactFlowNode]
-    edges: List[ReactFlowEdge]
+    nodes: List[NodeTypes]
+    edges: List[Union[ReactFlowEdge, DBEdge]]
     metadata: Dict[str, Any]
 
 class ArchitectureRequest(BaseModel):
@@ -274,46 +302,67 @@ class DiagramGenerator:
     @staticmethod
     def generate_database_diagram(description: str, context: Dict[str, Any], 
                                 user_responses: Dict[str, str]) -> Dict[str, Any]:
-        """Generate database schema diagram"""
+        """Generate database schema diagram with React Flow compatible format"""
         
-        db_prompt = f"""
-        Create a ReactFlow database schema diagram for:
+        user_prompt = f"""
+        Project Description: {description}
         
-        Description: {description}
-        Context: {json.dumps(context, indent=2)}
-        Responses: {json.dumps(user_responses, indent=2)}
+        Context Information:
+        {json.dumps(context, indent=2)}
         
-        Generate 4-8 related database tables with realistic columns and relationships.
+        Additional Requirements:
+        {json.dumps(user_responses, indent=2)}
         
-        Return ONLY this JSON:
-        {{
-            "nodes": [
-                {{
-                    "id": "table_name",
-                    "type": "dbTableNode",
-                    "position": {{"x": 100, "y": 100}},
-                    "data": {{
-                        "tableName": "users",
-                        "columns": [
-                            {{"name": "id", "type": "INTEGER", "isPrimary": true, "isNullable": false}},
-                            {{"name": "email", "type": "VARCHAR(255)", "isPrimary": false, "isNullable": false}}
-                        ],
-                        "description": "User accounts table"
-                    }},
-                    "style": {{"width": 250, "backgroundColor": "#ffffff", "border": "2px solid #8b5cf6"}}
-                }}
-            ],
-            "edges": [
-                {{
-                    "id": "rel_id",
-                    "source": "source_table",
-                    "target": "target_table", 
-                    "label": "FK",
-                    "type": "straight"
-                }}
-            ]
-        }}
+        Based on the above information, create a comprehensive database schema with 4-8 related tables that would support this system.
         """
+        
+        db_prompt = f"""You are an assistant that returns React Flow-compatible database schema diagrams in JSON.
+
+The JSON must include:
+- nodes: array of objects, each representing a database table.
+- edges: array of objects, representing relationships between tables.
+
+Each node (table) object must have the following structure:
+{{
+  "id": "unique_table_id_lowercase_snake_case", // e.g., "users", "products"
+  "data": {{
+    "label": "Table Name", // e.g., "Users", "Products"
+    "fields": [ // Array of column objects
+      {{
+        "name": "column_name", // e.g., "id", "username", "product_id"
+        "type": "SQL_TYPE",    // e.g., "INT", "VARCHAR(255)", "TIMESTAMP", "BOOLEAN", "TEXT"
+        "primaryKey": true/false, // true if it's a primary key
+        "foreignKey": true/false, // true if it's a foreign key
+        "references": "referenced_table_id.referenced_column_name" // Required if foreignKey is true, e.g., "users.id"
+      }}
+      // ... more field objects
+    ]
+  }},
+  "position": {{ "x": number, "y": number }} // Coordinates for the node
+}}
+
+Each edge (relationship) object must have the following structure:
+{{
+  "id": "unique_edge_id", // e.g., "edge-users-orders"
+  "source": "source_table_id",
+  "target": "target_table_id",
+  "type": "smoothstep", // Recommended for clean lines
+  "animated": true,    // Recommended for visual clarity
+  "markerEnd": {{ "type": "arrowclosed" }} // Recommended for direction
+}}
+
+Ensure that foreign key relationships are correctly represented by both:
+1. Setting "foreignKey": true and "references": "table_id.column_name" in the field definition of the child table.
+2. Creating an edge from the parent table's ID to the child table's ID (source -> target).
+
+Generate a comprehensive database schema with 6-12 related tables based on the project requirements.
+Position nodes in a logical layout with appropriate spacing (e.g., x: 0, 300, 600, 900 and y: 0, 150, 300, 450).
+
+Return ONLY valid JSON format with both "nodes" and "edges" arrays, without markdown or code block formatting.
+
+Now generate the database schema for:
+"{user_prompt}"
+"""
         
         try:
             response = llm.invoke([HumanMessage(content=db_prompt)])
@@ -327,18 +376,42 @@ class DiagramGenerator:
         return {
             "nodes": [
                 {
-                    "id": "users", "type": "dbTableNode", "position": {"x": 100, "y": 100},
+                    "id": "users",
                     "data": {
-                        "tableName": "users",
-                        "columns": [
-                            {"name": "id", "type": "INTEGER", "isPrimary": True, "isNullable": False},
-                            {"name": "email", "type": "VARCHAR(255)", "isPrimary": False, "isNullable": False}
+                        "label": "Users",
+                        "fields": [
+                            {"name": "id", "type": "INT", "primaryKey": True, "foreignKey": False},
+                            {"name": "email", "type": "VARCHAR(255)", "primaryKey": False, "foreignKey": False, "unique": True},
+                            {"name": "username", "type": "VARCHAR(50)", "primaryKey": False, "foreignKey": False},
+                            {"name": "created_at", "type": "TIMESTAMP", "primaryKey": False, "foreignKey": False}
                         ]
                     },
-                    "style": {"width": 250, "backgroundColor": "#ffffff", "border": "2px solid #8b5cf6"}
+                    "position": {"x": 100, "y": 100}
+                },
+                {
+                    "id": "orders",
+                    "data": {
+                        "label": "Orders",
+                        "fields": [
+                            {"name": "id", "type": "INT", "primaryKey": True, "foreignKey": False},
+                            {"name": "user_id", "type": "INT", "primaryKey": False, "foreignKey": True, "references": "users.id"},
+                            {"name": "order_date", "type": "TIMESTAMP", "primaryKey": False, "foreignKey": False},
+                            {"name": "total_amount", "type": "DECIMAL(10,2)", "primaryKey": False, "foreignKey": False}
+                        ]
+                    },
+                    "position": {"x": 300, "y": 100}
                 }
             ],
-            "edges": []
+            "edges": [
+                {
+                    "id": "edge-users-orders",
+                    "source": "users",
+                    "target": "orders",
+                    "type": "smoothstep",
+                    "animated": True,
+                    "markerEnd": {"type": "arrowclosed"}
+                }
+            ]
         }
 
 class TextArchitectureGenerator:
@@ -438,18 +511,39 @@ async def generate_diagram(request: ArchitectureRequest):
     try:
         user_responses = request.clarification_responses or {}
         
-        if request.diagram_type == "database":
+        if request.diagram_type == "db_diagram":
             diagram_data = diagram_gen.generate_database_diagram(
                 request.description, request.context, user_responses
             )
+            # Process nodes for database type
+            nodes = []
+            for node_data in diagram_data["nodes"]:
+                node = DBTableNode(
+                    id=node_data["id"],
+                    data=DBTableNodeData(
+                        label=node_data["data"]["label"],
+                        fields=[DBTableField(**field) for field in node_data["data"]["fields"]]
+                    ),
+                    position=node_data["position"]
+                )
+                nodes.append(node)
+            
+            # Process edges for database type
+            edges = []
+            for edge_data in diagram_data["edges"]:
+                edge = DBEdge(**edge_data)
+                edges.append(edge)
+
         else:
             diagram_data = diagram_gen.generate_architecture_diagram(
                 request.description, request.context, user_responses
             )
+            nodes = [ReactFlowNode(**node) for node in diagram_data["nodes"]]
+            edges = [ReactFlowEdge(**edge) for edge in diagram_data["edges"]]
         
         return DiagramResponse(
-            nodes=[ReactFlowNode(**node) for node in diagram_data["nodes"]],
-            edges=[ReactFlowEdge(**edge) for edge in diagram_data["edges"]],
+            nodes=nodes,
+            edges=edges,
             metadata={
                 "diagram_type": request.diagram_type,
                 "domain": request.context.get("project_domain", "software system"),
