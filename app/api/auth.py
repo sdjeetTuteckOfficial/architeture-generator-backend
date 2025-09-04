@@ -1,15 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
-import os
+from datetime import datetime, timedelta, timezone
 
-from .. import models, schemas, utils
+from app import models, schemas, utils
 from ..database import get_db
 from ..utils import (
     hash_password,
     verify_password,
     generate_otp,
-    send_email,
+    send_email,   # kept for later use
     create_access_token
 )
 
@@ -18,10 +17,11 @@ router = APIRouter()
 # -----------------
 # User Registration
 # -----------------
-@router.post("/signup", response_model=schemas.UserBase, status_code=status.HTTP_201_CREATED)
+@router.post("/signup", status_code=status.HTTP_201_CREATED)
 async def signup(user: schemas.UserCreate, db: Session = Depends(get_db)):
     """
-    Register a new user and send a verification OTP to their email.
+    Register a new user.
+    For now, SMTP is blocked and OTP is returned in the response.
     """
     db_user = db.query(models.User).filter(models.User.email == user.email).first()
     if db_user:
@@ -37,24 +37,29 @@ async def signup(user: schemas.UserCreate, db: Session = Depends(get_db)):
         email=user.email,
         hashed_password=hashed_password,
         otp_secret=otp,
-        otp_created_at=datetime.utcnow()
+        otp_created_at=datetime.now(timezone.utc)
     )
     
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
     
-    # Send OTP email
-    subject = "Verify Your Email"
-    body = f"Your one-time password (OTP) is: {otp}"
-    if not await send_email(user.email, subject, body):
-        # Handle email sending failure
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Could not send verification email"
-        )
-        
-    return db_user
+    # --- SMTP sending (blocked for now) ---
+    # subject = "Verify Your Email"
+    # body = f"Your one-time password (OTP) is: {otp}"
+    # if not await send_email(user.email, subject, body):
+    #     raise HTTPException(
+    #         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+    #         detail="Could not send verification email"
+    #     )
+    
+    # Return OTP directly in response (for testing only)
+    return {
+        "id": db_user.id,
+        "email": db_user.email,
+        "is_active": db_user.is_active,
+        "otp": otp
+    }
 
 # -----------------
 # OTP Verification
@@ -72,9 +77,16 @@ def verify_otp(otp_data: schemas.OtpVerify, db: Session = Depends(get_db)):
             detail="User not found"
         )
         
-    # Check if OTP is correct and not expired (e.g., within 5 minutes)
-    otp_valid_until = user.otp_created_at + timedelta(minutes=5)
-    if user.otp_secret == otp_data.otp and datetime.utcnow() < otp_valid_until:
+    # Ensure otp_created_at is timezone-aware
+    if user.otp_created_at.tzinfo is None:
+        otp_created_at = user.otp_created_at.replace(tzinfo=timezone.utc)
+    else:
+        otp_created_at = user.otp_created_at
+
+    otp_valid_until = otp_created_at + timedelta(minutes=5)
+    now_utc = datetime.now(timezone.utc)
+
+    if user.otp_secret == otp_data.otp and now_utc < otp_valid_until:
         user.is_active = True
         user.otp_secret = None  # Invalidate OTP after use
         db.commit()

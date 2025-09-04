@@ -6,6 +6,7 @@ pydantic
 python-multipart
 python-dotenv
 passlib[bcrypt]
+bcrypt<4.0.0
 itsdangerous
 Jinja2
 email-validator

@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta, timezone
-import os
 
 from . import models, schemas, utils
 from .database import get_db
@@ -37,7 +36,7 @@ async def signup(user: schemas.UserCreate, db: Session = Depends(get_db)):
         email=user.email,
         hashed_password=hashed_password,
         otp_secret=otp,
-        otp_created_at=datetime.now(timezone.utc)
+        otp_created_at=datetime.now(timezone.utc)  # always timezone-aware
     )
     
     db.add(db_user)
@@ -72,13 +71,16 @@ def verify_otp(otp_data: schemas.OtpVerify, db: Session = Depends(get_db)):
             detail="User not found"
         )
         
-    # Check if OTP is correct and not expired (e.g., within 5 minutes)
-    otp_valid_until = user.otp_created_at + timedelta(minutes=5)
-    
-    # Use a timezone-aware 'now' object for comparison
-    now_utc_aware = datetime.now(timezone.utc)
+    # Ensure otp_created_at is timezone-aware
+    if user.otp_created_at.tzinfo is None:
+        otp_created_at = user.otp_created_at.replace(tzinfo=timezone.utc)
+    else:
+        otp_created_at = user.otp_created_at
 
-    if user.otp_secret == otp_data.otp and now_utc_aware < otp_valid_until:
+    otp_valid_until = otp_created_at + timedelta(minutes=5)
+    now_utc = datetime.now(timezone.utc)
+
+    if user.otp_secret == otp_data.otp and now_utc < otp_valid_until:
         user.is_active = True
         user.otp_secret = None  # Invalidate OTP after use
         db.commit()
