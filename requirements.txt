@@ -10,3 +10,4 @@ google-generativeai
 python-dotenv
 typing-extensions
 annotated-types
+PyPDF2

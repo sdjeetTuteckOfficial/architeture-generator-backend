@@ -1,9 +1,6 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union
 
-class ProjectRequest(BaseModel):
-    description: str
-
 class AnalysisResponse(BaseModel):
     project_domain: str
     completeness_score: float
