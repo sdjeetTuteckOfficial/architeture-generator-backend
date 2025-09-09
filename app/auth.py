@@ -28,21 +28,23 @@ async def signup(user: schemas.UserCreate, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
         )
-    
+
     otp = generate_otp()
     hashed_password = hash_password(user.password)
-    
+
     db_user = models.User(
         email=user.email,
         hashed_password=hashed_password,
         otp_secret=otp,
-        otp_created_at=datetime.now(timezone.utc)  # always timezone-aware
+        otp_created_at=datetime.now(timezone.utc),
+        first_name=getattr(user, 'first_name', None),  # Optional field
+        last_name=getattr(user, 'last_name', None)     # Optional field
     )
-    
+
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
-    
+
     # Send OTP email
     subject = "Verify Your Email"
     body = f"Your one-time password (OTP) is: {otp}"
@@ -64,13 +66,13 @@ def verify_otp(otp_data: schemas.OtpVerify, db: Session = Depends(get_db)):
     Verify the user's OTP to activate their account.
     """
     user = db.query(models.User).filter(models.User.email == otp_data.email).first()
-    
+
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
-        
+
     # Ensure otp_created_at is timezone-aware
     if user.otp_created_at.tzinfo is None:
         otp_created_at = user.otp_created_at.replace(tzinfo=timezone.utc)
@@ -95,24 +97,24 @@ def verify_otp(otp_data: schemas.OtpVerify, db: Session = Depends(get_db)):
 # User Sign-in
 # -----------------
 @router.post("/signin", response_model=schemas.Token)
-def signin(user: schemas.UserCreate, db: Session = Depends(get_db)):
+def signin(user: schemas.UserLogin, db: Session = Depends(get_db)):
     """
     Sign in an active user and return a JWT access token.
     """
     db_user = db.query(models.User).filter(models.User.email == user.email).first()
-    
+
     if not db_user or not verify_password(user.password, db_user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials"
         )
-        
+
     if not db_user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Please verify your email first"
         )
-    
+
     access_token = create_access_token(data={"sub": db_user.email})
-    
+
     return {"access_token": access_token, "token_type": "bearer"}

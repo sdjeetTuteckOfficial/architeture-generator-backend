@@ -11,7 +11,7 @@ from ..utils import (
     send_email,   # kept for later use
     create_access_token
 )
-
+import uuid
 router = APIRouter()
 
 # -----------------
@@ -34,7 +34,10 @@ async def signup(user: schemas.UserCreate, db: Session = Depends(get_db)):
     hashed_password = hash_password(user.password)
     
     db_user = models.User(
+        id=uuid.uuid4(),
         email=user.email,
+        first_name=user.first_name,
+        last_name=user.last_name,
         hashed_password=hashed_password,
         otp_secret=otp,
         otp_created_at=datetime.now(timezone.utc)

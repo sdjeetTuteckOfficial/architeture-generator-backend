@@ -1,24 +1,36 @@
 from pydantic import BaseModel, EmailStr
+from typing import Optional
+from datetime import datetime
 
+# Base schema for User (for responses)
 class UserBase(BaseModel):
+    id: Optional[str] = None
     email: EmailStr
-
-class UserCreate(UserBase):
-    password: str
-
-class UserInDB(UserBase):
-    hashed_password: str
-    is_active: bool
+    is_active: bool = False
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
+# Schema for user creation (signup)
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str
+    first_name: Optional[str] = None  # Make optional
+    last_name: Optional[str] = None   # Make optional
+
+# Schema for user login (signin) - only email and password
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+# Schema for OTP verification
+class OtpVerify(BaseModel):
+    email: EmailStr
+    otp: str
+
+# Schema for JWT token response
 class Token(BaseModel):
     access_token: str
     token_type: str
-
-class OtpRequest(BaseModel):
-    email: EmailStr
-
-class OtpVerify(OtpRequest):
-    otp: str
