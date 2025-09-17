@@ -19,3 +19,4 @@ google-generativeai
 typing-extensions
 annotated-types
 PyPDF2
+psycopg2
