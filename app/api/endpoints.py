@@ -5,7 +5,11 @@ from typing import Dict, Optional
 from datetime import datetime
 import io
 import PyPDF2
-
+from typing import List, Optional, Dict, Any
+from app.core import models
+from app.database import get_db, SessionLocal
+from app.services.thread_services import create_thread, get_thread, get_threads, create_conversation, get_conversation, get_conversations
+from uuid import UUID
 
 from app.core import models
 from app.services import analyzer, diagram_generator, text_generator
@@ -131,3 +135,45 @@ async def generate_text_architecture(request: models.ArchitectureRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Text architecture error: {str(e)}")
+    
+@router.post("/threads", response_model=models.ThreadResponse, status_code=201)
+def create_new_thread(thread_data: models.ThreadCreate, db: SessionLocal = Depends(get_db)):
+    """Creates a new conversation thread."""
+    return create_thread(db=db, thread_data=thread_data)
+
+@router.get("/threads/{thread_id}", response_model=models.ThreadResponse)
+def read_thread(thread_id: UUID, db: SessionLocal = Depends(get_db)):
+    """Retrieves a specific conversation thread by its ID."""
+    thread = get_thread(db=db, thread_id=thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    return thread
+
+@router.get("/threads", response_model=List[models.ThreadResponse])
+def read_threads(user_id: UUID, skip: int = 0, limit: int = 100, db: SessionLocal = Depends(get_db)):
+    """Retrieves all conversation threads for a specific user."""
+    threads = get_threads(db=db, user_id=user_id, skip=skip, limit=limit)
+    return threads
+
+@router.post("/threads/{thread_id}/conversations", response_model=models.ConversationResponse, status_code=201)
+def create_new_conversation(thread_id: UUID, conversation_data: models.ConversationCreate, db: SessionLocal = Depends(get_db)):
+    """Adds a new conversation entry to a specific thread."""
+    thread = get_thread(db=db, thread_id=thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    
+    return create_conversation(db=db, thread_id=thread_id, conversation_data=conversation_data)
+
+@router.get("/conversations/{conversation_id}", response_model=models.ConversationResponse)
+def read_conversation(conversation_id: UUID, db: SessionLocal = Depends(get_db)):
+    """Retrieves a specific conversation entry by its ID."""
+    conversation = get_conversation(db=db, conversation_id=conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conversation
+
+@router.get("/threads/{thread_id}/conversations", response_model=List[models.ConversationResponse])
+def read_conversations_in_thread(thread_id: UUID, skip: int = 0, limit: int = 100, db: SessionLocal = Depends(get_db)):
+    """Retrieves all conversations within a specific thread."""
+    conversations = get_conversations(db=db, thread_id=thread_id, skip=skip, limit=limit)
+    return conversations

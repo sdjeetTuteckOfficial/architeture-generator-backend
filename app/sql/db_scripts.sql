@@ -32,3 +32,19 @@
  
 -- CREATE INDEX IF NOT EXISTS ix_users_id
 --     ON public.users (id);
+
+CREATE TABLE threads (
+    thread_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL,
+    thread_name VARCHAR(255) NOT NULL,
+    conversation_ids UUID[] NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE conversations (
+    conversation_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    thread_id UUID NOT NULL REFERENCES threads(thread_id),
+    version INT NOT NULL,
+    diagram_json JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT unique_thread_version UNIQUE (thread_id, version)
+);

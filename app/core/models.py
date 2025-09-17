@@ -1,5 +1,7 @@
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any, Union
+from uuid import UUID
+from datetime import datetime
 
 class AnalysisResponse(BaseModel):
     project_domain: str
@@ -69,3 +71,32 @@ class TextArchitectureResponse(BaseModel):
     domain: str
     recommendations: List[str]
     timestamp: str
+    
+class ThreadBase(BaseModel):
+    user_id: UUID
+    thread_name: str
+
+class ThreadCreate(ThreadBase):
+    pass
+
+class ThreadResponse(ThreadBase):
+    thread_id: UUID
+    conversation_ids: List[UUID] = []
+    
+    class Config:
+        from_attributes = True
+
+class ConversationBase(BaseModel):
+    thread_id: UUID
+    version: int
+    diagram_json: Dict[str, Any]
+
+class ConversationCreate(ConversationBase):
+    pass
+
+class ConversationResponse(ConversationBase):
+    conversation_id: UUID
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
