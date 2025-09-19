@@ -20,3 +20,7 @@ typing-extensions
 annotated-types
 PyPDF2
 psycopg2
+python-jose[cryptography]
+httpx
+pytest
+pytest-asyncio

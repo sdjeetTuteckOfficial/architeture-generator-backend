@@ -71,15 +71,23 @@ class TextArchitectureResponse(BaseModel):
     domain: str
     recommendations: List[str]
     timestamp: str
-    
+
+# UPDATED: Match your actual database schema
+class ThreadCreateRequest(BaseModel):
+    """Schema for thread creation requests from frontend"""
+    thread_name: str
+    diagram_type: Optional[str] = "architecture"  # Keep for frontend, but won't be stored in DB
+
 class ThreadBase(BaseModel):
     user_id: UUID
     thread_name: str
 
 class ThreadCreate(ThreadBase):
+    """Internal schema for thread creation - matches database fields only"""
     pass
 
 class ThreadResponse(ThreadBase):
+    """Response schema - matches your actual database Thread model"""
     thread_id: UUID
     conversation_ids: List[UUID] = []
     
