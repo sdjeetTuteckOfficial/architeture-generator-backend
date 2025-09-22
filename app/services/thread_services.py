@@ -14,9 +14,17 @@ def create_thread(db: Session, thread_data: pydantic_models.ThreadCreate):
 
 def get_thread(db: Session, thread_id: UUID):
     return db.query(db_models.Thread).filter(db_models.Thread.thread_id == thread_id).first()
-
 def get_threads(db: Session, user_id: UUID, skip: int = 0, limit: int = 100):
-    return db.query(db_models.Thread).filter(db_models.Thread.user_id == user_id).offset(skip).limit(limit).all()
+    return (
+        db.query(db_models.Thread)
+        .filter(db_models.Thread.user_id == user_id)
+        .order_by(db_models.Thread.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all())
+
+# def get_threads(db: Session, user_id: UUID, skip: int = 0, limit: int = 100):
+#     return db.query(db_models.Thread).filter(db_models.Thread.user_id == user_id).offset(skip).limit(limit).all()
 
 def create_conversation(db: Session, thread_id: UUID, conversation_data: pydantic_models.ConversationCreate):
     db_conversation = db_models.Conversation(**conversation_data.model_dump())
