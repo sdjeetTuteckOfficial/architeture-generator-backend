@@ -20,7 +20,7 @@ router = APIRouter()
 @router.post("/signup", response_model=schemas.UserCreateResponse, status_code=status.HTTP_201_CREATED)
 async def signup(user: schemas.UserCreate, db: Session = Depends(get_db)):
     """
-    Register a new user and return a verification OTP in the response.
+    Register a new user and send verification OTP via email.
     """
     # Check if user already exists
     db_user = db.query(models.User).filter(models.User.email == user.email).first()
@@ -47,14 +47,37 @@ async def signup(user: schemas.UserCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(db_user)
 
-    # ✅ Return OTP in response instead of sending email
+    # Send OTP via email
+    subject = "Welcome! Verify Your Email Address"
+    body = f"""
+    Welcome to our platform!
+    
+    Your verification code is: {otp}
+    
+    This code will expire in 5 minutes. Please use it to verify your email address.
+    
+    If you didn't create this account, please ignore this email.
+    """
+    
+    email_sent = await send_email(db_user.email, subject, body)
+    
+    if not email_sent:
+        # Rollback user creation if email fails
+        db.delete(db_user)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not send verification email. Please try again."
+        )
+
+    # Return response without OTP for security
     return {
         "id": str(db_user.id),
         "email": db_user.email,
         "is_active": db_user.is_active,
         "first_name": db_user.first_name,
         "last_name": db_user.last_name,
-        "otp": otp  # OTP included directly
+        "message": "Registration successful! Please check your email for verification code."
     }
 
 # -----------------
@@ -96,7 +119,7 @@ def verify_otp(otp_data: schemas.OtpVerify, db: Session = Depends(get_db)):
 # -----------------
 # Resend OTP
 # -----------------
-@router.post("/resend-otp", response_model=schemas.OtpResponse, status_code=status.HTTP_200_OK)
+@router.post("/resend-otp", response_model=schemas.MessageResponse, status_code=status.HTTP_200_OK)
 async def resend_otp(email_data: schemas.EmailRequest, db: Session = Depends(get_db)):
     """
     Resend OTP to user's email for account verification.
@@ -124,28 +147,37 @@ async def resend_otp(email_data: schemas.EmailRequest, db: Session = Depends(get
     
     # Send OTP email
     subject = "Verify Your Email - New OTP"
-    body = f"Your new one-time password (OTP) is: {otp}"
-    if not await send_email(email_data.email, subject, body):
+    body = f"""
+    Your new verification code is: {otp}
+    
+    This code will expire in 5 minutes. Please use it to verify your email address.
+    
+    If you didn't request this, please ignore this email.
+    """
+    
+    email_sent = await send_email(email_data.email, subject, body)
+    
+    if not email_sent:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Could not send verification email"
         )
     
-    return {"message": "OTP has been resent to your email", "otp": otp}
+    return {"message": "OTP has been resent to your email"}
 
 # -----------------
 # Forgot Password
 # -----------------
-@router.post("/forgot-password", response_model=schemas.OtpResponse, status_code=status.HTTP_200_OK)
+@router.post("/forgot-password", response_model=schemas.MessageResponse, status_code=status.HTTP_200_OK)
 async def forgot_password(email_data: schemas.EmailRequest, db: Session = Depends(get_db)):
     """
-    Generate a password reset OTP and return it in the response (no email sent).
+    Generate a password reset OTP and send it via email.
     """
     user = db.query(models.User).filter(models.User.email == email_data.email).first()
     
     if not user:
-        # Don't reveal existence, return None for security
-        return {"message": "If the email exists, a password reset OTP has been generated", "otp": None}
+        # Don't reveal if email exists for security, but still return success message
+        return {"message": "If the email exists, a password reset code has been sent"}
     
     if not user.is_active:
         raise HTTPException(
@@ -160,11 +192,27 @@ async def forgot_password(email_data: schemas.EmailRequest, db: Session = Depend
     
     db.commit()
     
-    # ✅ Return OTP directly in response
-    return {
-        "message": "Password reset OTP has been generated",
-        "otp": otp
-    }
+    # Send password reset email
+    subject = "Password Reset Code"
+    body = f"""
+    You requested a password reset for your account.
+    
+    Your password reset code is: {otp}
+    
+    This code will expire in 5 minutes. Use it to reset your password.
+    
+    If you didn't request this password reset, please ignore this email and your password will remain unchanged.
+    """
+    
+    email_sent = await send_email(email_data.email, subject, body)
+    
+    if not email_sent:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not send password reset email"
+        )
+    
+    return {"message": "Password reset code has been sent to your email"}
 
 # -----------------
 # Reset Password
@@ -174,8 +222,9 @@ def reset_password(reset_data: schemas.PasswordReset, db: Session = Depends(get_
     """
     Reset user's password using OTP verification.
     """
+    print(reset_data.email, reset_data.otp, reset_data.new_password)
     user = db.query(models.User).filter(models.User.email == reset_data.email).first()
-    
+    print(user)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -196,7 +245,7 @@ def reset_password(reset_data: schemas.PasswordReset, db: Session = Depends(get_
 
     otp_valid_until = otp_created_at + timedelta(minutes=5)
     now_utc = datetime.now(timezone.utc)
-
+    print("otp", user.otp_secret, reset_data.otp)
     if user.otp_secret != reset_data.otp or now_utc >= otp_valid_until:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -233,7 +282,7 @@ def signin(user: schemas.UserLogin, db: Session = Depends(get_db)):
             detail="Please verify your email first"
         )
 
-    # Correctly create the payload with the user's UUID as the 'sub' claim
+    # Create access token with user's UUID as the 'sub' claim
     access_token = create_access_token(data={"sub": str(db_user.id)})
 
     return {"access_token": access_token, "token_type": "bearer"}
