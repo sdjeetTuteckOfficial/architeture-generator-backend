@@ -1,7 +1,7 @@
 # app/main.py (Updated)
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import endpoints, auth
+from app.api import endpoints, auth, websocket_endpoints
 from app.database import Base, engine
 from app.core.config import settings
 
@@ -25,6 +25,7 @@ app.add_middleware(
 # Include API routers
 app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 app.include_router(endpoints.router)  # This now includes protected /architecture routes
+app.include_router(websocket_endpoints.router, tags=["WebSocket"]) 
 
 # Root endpoint (public)
 @app.get("/")
