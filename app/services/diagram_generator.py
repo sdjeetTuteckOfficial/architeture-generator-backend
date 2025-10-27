@@ -1,3 +1,4 @@
+# diagram_generator.py
 import json
 import re
 from typing import Dict, Any
