@@ -1,228 +1,292 @@
 # app/services/modification_service.py
 from typing import Dict, List, Any
+import google.generativeai as genai
+import json
+import os
+import logging
 import re
 
+logger = logging.getLogger(__name__)
 
 class DiagramModifier:
-    """Service for intelligently modifying existing diagrams"""
+    """Service for intelligently modifying existing diagrams using AI"""
     
     def __init__(self):
-        self.modification_keywords = {
-            "add": ["add", "include", "insert", "new", "create"],
-            "remove": ["remove", "delete", "eliminate", "drop", "exclude"],
-            "update": ["change", "modify", "update", "replace", "rename"],
-            "connect": ["connect", "link", "integrate", "join", "attach"],
-            "disconnect": ["disconnect", "unlink", "separate", "detach"]
-        }
+        # Initialize Gemini
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY not found in environment")
+        
+        genai.configure(api_key=api_key)
+        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        self.modification_prompt_template = """
+You are an expert system architect modifying architecture diagrams.
+
+CURRENT DIAGRAM (JSON):
+{current_diagram}
+
+USER REQUEST: "{modification_request}"
+
+MODIFICATION RULES:
+1. ADD: If request says "add X", create a new node for X
+2. REMOVE: If request says "remove X" or "delete X", DELETE all nodes containing X in their label
+3. UPDATE: If request says "change X to Y" or "make X use Y", UPDATE existing node X
+4. CONNECT: If request says "connect X to Y", add an edge between them
+5. If a component already exists, UPDATE it instead of creating duplicate
+
+CRITICAL REQUIREMENTS:
+- Return ONLY valid JSON in this EXACT format: {{"nodes": [...], "edges": [...]}}
+- Each node MUST have: {{"id": "node_X", "type": "custom", "data": {{"label": "...", "type": "..."}}, "position": {{"x": 100, "y": 100}}}}
+- Each edge MUST have: {{"id": "edge_X", "source": "node_X", "target": "node_Y", "type": "smoothstep", "label": "uses", "animated": false}}
+- When REMOVING nodes, also remove all edges connected to those nodes
+- Preserve node IDs for existing nodes that aren't being removed
+- DO NOT add any explanation, ONLY return the JSON
+
+EXAMPLE REMOVE:
+Current has node: {{"id": "node_3", "data": {{"label": "Redis Cache"}}}}
+Request: "remove cache"
+Result: Delete node_3 AND any edges with source=node_3 or target=node_3
+
+Return the complete modified diagram JSON now:
+"""
     
-    def detect_modification_type(self, request: str) -> str:
-        """Detect what type of modification is being requested"""
+    def apply_modification(
+        self, 
+        current_diagram: Dict, 
+        modification_request: str,
+        conversation_history: List[Dict] = None
+    ) -> Dict:
+        """
+        Apply modifications to diagram using AI with full context
+        """
+        try:
+            logger.info(f"🔧 Starting modification: '{modification_request}'")
+            logger.info(f"📊 Current diagram has {len(current_diagram.get('nodes', []))} nodes")
+            
+            # Check if it's a simple remove operation - use fallback for reliability
+            if self._is_simple_remove(modification_request):
+                logger.info("🎯 Detected simple REMOVE operation - using direct method")
+                return self._apply_simple_remove(current_diagram, modification_request)
+            
+            # For complex modifications, use AI
+            prompt = self.modification_prompt_template.format(
+                current_diagram=json.dumps(current_diagram, indent=2),
+                modification_request=modification_request
+            )
+            
+            logger.info(f"🤖 Sending to Gemini AI...")
+            
+            # Generate with AI
+            response = self.model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.1,  # Low temperature for consistent output
+                )
+            )
+            response_text = response.text.strip()
+            
+            logger.info(f"📨 AI Response length: {len(response_text)} chars")
+            logger.debug(f"AI Response preview: {response_text[:500]}...")
+            
+            # Extract JSON
+            modified_diagram = self._extract_json_from_response(response_text)
+            
+            if not modified_diagram:
+                logger.error("❌ Failed to extract valid JSON from AI response")
+                logger.error(f"Response was: {response_text}")
+                return current_diagram
+            
+            # Validate structure
+            if not self._validate_diagram_structure(modified_diagram):
+                logger.error("❌ Invalid diagram structure from AI")
+                return current_diagram
+            
+            logger.info(f"✅ Successfully modified! New diagram has {len(modified_diagram.get('nodes', []))} nodes")
+            return modified_diagram
+            
+        except Exception as e:
+            logger.error(f"❌ Modification error: {str(e)}", exc_info=True)
+            return current_diagram
+    
+    def _is_simple_remove(self, request: str) -> bool:
+        """Check if this is a simple remove operation"""
         request_lower = request.lower()
-        
-        for mod_type, keywords in self.modification_keywords.items():
-            if any(keyword in request_lower for keyword in keywords):
-                return mod_type
-        
-        return "unknown"
+        remove_keywords = ["remove", "delete", "drop", "eliminate"]
+        return any(keyword in request_lower for keyword in remove_keywords)
     
-    def extract_component_names(self, text: str) -> List[str]:
-        """Extract component/service names from text"""
-        # Common patterns for component names
-        patterns = [
-            r'\b([A-Z][a-z]+(?:[A-Z][a-z]+)*)\b',  # CamelCase
-            r'"([^"]+)"',  # Quoted text
-            r"'([^']+)'",  # Single quoted
-        ]
+    def _apply_simple_remove(self, diagram: Dict, request: str) -> Dict:
+        """Apply simple remove operation directly without AI"""
+        nodes = diagram.get("nodes", []).copy()
+        edges = diagram.get("edges", []).copy()
         
-        components = []
-        for pattern in patterns:
-            matches = re.findall(pattern, text)
-            components.extend(matches)
+        # Extract what to remove
+        request_lower = request.lower()
+        for keyword in ["remove", "delete", "drop", "eliminate"]:
+            if keyword in request_lower:
+                # Get the component name to remove
+                component_to_remove = request_lower.replace(keyword, "").strip()
+                break
+        else:
+            component_to_remove = request_lower
         
-        return list(set(components))
-    
-    def add_components(self, diagram: Dict, components: List[str]) -> Dict:
-        """Add new components to diagram"""
-        nodes = diagram.get("nodes", [])
-        edges = diagram.get("edges", [])
-        
-        existing_labels = {node.get("data", {}).get("label", "").lower() for node in nodes}
-        
-        for comp in components:
-            if comp.lower() not in existing_labels:
-                node_id = f"node_{len(nodes) + 1}"
-                nodes.append({
-                    "id": node_id,
-                    "type": "custom",
-                    "data": {
-                        "label": comp,
-                        "type": self._guess_component_type(comp)
-                    },
-                    "position": {
-                        "x": 100 + (len(nodes) % 3) * 250,
-                        "y": 100 + (len(nodes) // 3) * 200
-                    }
-                })
-        
-        return {"nodes": nodes, "edges": edges}
-    
-    def remove_components(self, diagram: Dict, components: List[str]) -> Dict:
-        """Remove components from diagram"""
-        nodes = diagram.get("nodes", [])
-        edges = diagram.get("edges", [])
+        logger.info(f"🎯 Removing component matching: '{component_to_remove}'")
         
         # Find nodes to remove
         nodes_to_remove = []
-        for comp in components:
-            for node in nodes:
-                label = node.get("data", {}).get("label", "").lower()
-                if comp.lower() in label:
-                    nodes_to_remove.append(node["id"])
+        for node in nodes:
+            label = node.get("data", {}).get("label", "").lower()
+            if component_to_remove in label:
+                nodes_to_remove.append(node["id"])
+                logger.info(f"   ❌ Marking for removal: {node['id']} - {node.get('data', {}).get('label')}")
+        
+        if not nodes_to_remove:
+            logger.warning(f"⚠️ No nodes found matching '{component_to_remove}'")
+            return diagram
         
         # Remove nodes
         nodes = [n for n in nodes if n["id"] not in nodes_to_remove]
+        logger.info(f"✂️ Removed {len(nodes_to_remove)} nodes")
         
-        # Remove associated edges
-        node_ids = [n["id"] for n in nodes]
+        # Remove connected edges
+        initial_edge_count = len(edges)
         edges = [
             e for e in edges 
-            if e.get("source") in node_ids and e.get("target") in node_ids
+            if e.get("source") not in nodes_to_remove and e.get("target") not in nodes_to_remove
+        ]
+        removed_edges = initial_edge_count - len(edges)
+        logger.info(f"✂️ Removed {removed_edges} connected edges")
+        
+        return {"nodes": nodes, "edges": edges}
+    
+    def _extract_json_from_response(self, response_text: str) -> Dict:
+        """Extract JSON from AI response (handles markdown code blocks)"""
+        try:
+            # Try direct parse
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            pass
+        
+        # Try extracting from markdown code block
+        patterns = [
+            r'```json\s*(\{.*?\})\s*```',
+            r'```\s*(\{.*?\})\s*```',
+            r'(\{.*\})',
         ]
         
-        return {"nodes": nodes, "edges": edges}
+        for pattern in patterns:
+            match = re.search(pattern, response_text, re.DOTALL)
+            if match:
+                try:
+                    json_str = match.group(1).strip()
+                    return json.loads(json_str)
+                except json.JSONDecodeError:
+                    continue
+        
+        logger.error("Failed to extract JSON from response")
+        return None
     
-    def connect_components(self, diagram: Dict, source: str, target: str, relationship: str = "uses") -> Dict:
-        """Create connection between components"""
-        nodes = diagram.get("nodes", [])
-        edges = diagram.get("edges", [])
+    def _validate_diagram_structure(self, diagram: Dict) -> bool:
+        """Validate diagram has required structure"""
+        if not isinstance(diagram, dict):
+            logger.error("Diagram is not a dict")
+            return False
         
-        # Find source and target nodes
-        source_node = None
-        target_node = None
+        if "nodes" not in diagram or "edges" not in diagram:
+            logger.error("Missing 'nodes' or 'edges' key")
+            return False
         
-        for node in nodes:
-            label = node.get("data", {}).get("label", "").lower()
-            if source.lower() in label:
-                source_node = node["id"]
-            if target.lower() in label:
-                target_node = node["id"]
+        if not isinstance(diagram["nodes"], list):
+            logger.error("'nodes' is not a list")
+            return False
         
-        # Add edge if both nodes found
-        if source_node and target_node:
-            edge_id = f"edge_{len(edges) + 1}"
-            edges.append({
-                "id": edge_id,
-                "source": source_node,
-                "target": target_node,
-                "type": "smoothstep",
-                "label": relationship,
-                "animated": False
-            })
+        if not isinstance(diagram["edges"], list):
+            logger.error("'edges' is not a list")
+            return False
         
-        return {"nodes": nodes, "edges": edges}
-    
-    def update_component(self, diagram: Dict, old_name: str, new_name: str) -> Dict:
-        """Update/rename a component"""
-        nodes = diagram.get("nodes", [])
-        edges = diagram.get("edges", [])
-        
-        for node in nodes:
-            label = node.get("data", {}).get("label", "")
-            if old_name.lower() in label.lower():
-                node["data"]["label"] = new_name
-                break
-        
-        return {"nodes": nodes, "edges": edges}
-    
-    def _guess_component_type(self, name: str) -> str:
-        """Guess component type from name"""
-        name_lower = name.lower()
-        
-        if "db" in name_lower or "database" in name_lower:
-            return "database"
-        elif "api" in name_lower:
-            return "api"
-        elif "service" in name_lower:
-            return "service"
-        elif "queue" in name_lower:
-            return "queue"
-        elif "cache" in name_lower:
-            return "cache"
-        else:
-            return "service"
-    
-    def apply_modification(self, diagram: Dict, request: str) -> Dict:
-        """Main method to apply modifications based on natural language request"""
-        mod_type = self.detect_modification_type(request)
-        components = self.extract_component_names(request)
-        
-        if mod_type == "add":
-            return self.add_components(diagram, components)
-        
-        elif mod_type == "remove":
-            return self.remove_components(diagram, components)
-        
-        elif mod_type == "update" and len(components) >= 2:
-            return self.update_component(diagram, components[0], components[1])
-        
-        elif mod_type == "connect" and len(components) >= 2:
-            relationship = "uses"
-            if "via" in request.lower():
-                # Extract relationship type
-                via_match = re.search(r'via\s+(\w+)', request.lower())
-                if via_match:
-                    relationship = via_match.group(1)
+        # Validate each node has required fields
+        for i, node in enumerate(diagram["nodes"]):
+            if not isinstance(node, dict):
+                logger.error(f"Node {i} is not a dict")
+                return False
             
-            return self.connect_components(diagram, components[0], components[1], relationship)
+            if "id" not in node:
+                logger.error(f"Node {i} missing 'id'")
+                return False
+            
+            if "data" not in node or not isinstance(node["data"], dict):
+                logger.error(f"Node {i} missing or invalid 'data'")
+                return False
+            
+            if "label" not in node["data"]:
+                logger.error(f"Node {i} missing 'label' in data")
+                return False
+            
+            if "position" not in node:
+                logger.error(f"Node {i} missing 'position'")
+                return False
         
-        elif mod_type == "disconnect" and len(components) >= 2:
-            return self.disconnect_components(diagram, components[0], components[1])
-        
-        else:
-            # If we can't determine type, try to add as new components
-            if components:
-                return self.add_components(diagram, components)
-        
-        return diagram
-    
-    def disconnect_components(self, diagram: Dict, source: str, target: str) -> Dict:
-        """Remove connection between components"""
-        nodes = diagram.get("nodes", [])
-        edges = diagram.get("edges", [])
-        
-        # Find source and target nodes
-        source_node = None
-        target_node = None
-        
-        for node in nodes:
-            label = node.get("data", {}).get("label", "").lower()
-            if source.lower() in label:
-                source_node = node["id"]
-            if target.lower() in label:
-                target_node = node["id"]
-        
-        # Remove edges between these nodes
-        if source_node and target_node:
-            edges = [
-                e for e in edges 
-                if not ((e.get("source") == source_node and e.get("target") == target_node) or
-                       (e.get("source") == target_node and e.get("target") == source_node))
-            ]
-        
-        return {"nodes": nodes, "edges": edges}
+        logger.info(f"✅ Validation passed: {len(diagram['nodes'])} nodes, {len(diagram['edges'])} edges")
+        return True
     
     def get_modification_summary(self, old_diagram: Dict, new_diagram: Dict) -> Dict:
         """Generate summary of what changed"""
-        old_nodes = len(old_diagram.get("nodes", []))
-        new_nodes = len(new_diagram.get("nodes", []))
-        old_edges = len(old_diagram.get("edges", []))
-        new_edges = len(new_diagram.get("edges", []))
+        old_nodes = old_diagram.get("nodes", [])
+        new_nodes = new_diagram.get("nodes", [])
+        old_edges = old_diagram.get("edges", [])
+        new_edges = new_diagram.get("edges", [])
         
-        return {
-            "nodes_added": max(0, new_nodes - old_nodes),
-            "nodes_removed": max(0, old_nodes - new_nodes),
-            "edges_added": max(0, new_edges - old_edges),
-            "edges_removed": max(0, old_edges - new_edges),
-            "total_nodes": new_nodes,
-            "total_edges": new_edges
+        # Track changes
+        old_node_ids = {n["id"] for n in old_nodes}
+        new_node_ids = {n["id"] for n in new_nodes}
+        
+        old_node_labels = {n["id"]: n.get("data", {}).get("label", "") for n in old_nodes}
+        new_node_labels = {n["id"]: n.get("data", {}).get("label", "") for n in new_nodes}
+        
+        nodes_added = new_node_ids - old_node_ids
+        nodes_removed = old_node_ids - new_node_ids
+        
+        # Check for updated nodes (same ID, different label)
+        nodes_updated = []
+        for node_id in old_node_ids & new_node_ids:
+            if old_node_labels.get(node_id) != new_node_labels.get(node_id):
+                nodes_updated.append({
+                    "id": node_id,
+                    "old": old_node_labels.get(node_id),
+                    "new": new_node_labels.get(node_id)
+                })
+        
+        removed_details = [
+            {"id": node_id, "label": old_node_labels.get(node_id)}
+            for node_id in nodes_removed
+        ]
+        
+        added_details = [
+            {"id": node_id, "label": new_node_labels.get(node_id)}
+            for node_id in nodes_added
+        ]
+        
+        summary = {
+            "nodes_added": len(nodes_added),
+            "nodes_removed": len(nodes_removed),
+            "nodes_updated": len(nodes_updated),
+            "updated_details": nodes_updated,
+            "removed_details": removed_details,
+            "added_details": added_details,
+            "edges_added": max(0, len(new_edges) - len(old_edges)),
+            "edges_removed": max(0, len(old_edges) - len(new_edges)),
+            "total_nodes": len(new_nodes),
+            "total_edges": len(new_edges)
         }
+        
+        logger.info(f"📊 Modification Summary:")
+        logger.info(f"   ➕ Added: {summary['nodes_added']} nodes")
+        logger.info(f"   ➖ Removed: {summary['nodes_removed']} nodes")
+        logger.info(f"   ✏️ Updated: {summary['nodes_updated']} nodes")
+        
+        if removed_details:
+            logger.info(f"   Removed components:")
+            for detail in removed_details:
+                logger.info(f"      - {detail['label']}")
+        
+        return summary
