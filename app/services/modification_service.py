@@ -18,10 +18,13 @@ class DiagramModifier:
             raise ValueError("GEMINI_API_KEY not found in environment")
         
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        self.model = genai.GenerativeModel('gemini-2.0-flash')
         
         self.modification_prompt_template = """
 You are an expert system architect modifying architecture diagrams.
+
+CONVERSATION HISTORY:
+{conversation_history}
 
 CURRENT DIAGRAM (JSON):
 {current_diagram}
@@ -35,6 +38,11 @@ MODIFICATION RULES:
 4. CONNECT: If request says "connect X to Y", add an edge between them
 5. If a component already exists, UPDATE it instead of creating duplicate
 
+CONTEXT INSTRUCTIONS:
+- Use the conversation history to understand previous versions and maintain consistency
+- Ensure modifications align with the architectural context from past versions
+- Avoid duplicating components unnecessarily based on history
+
 CRITICAL REQUIREMENTS:
 - Return ONLY valid JSON in this EXACT format: {{"nodes": [...], "edges": [...]}}
 - Each node MUST have: {{"id": "node_X", "type": "custom", "data": {{"label": "...", "type": "..."}}, "position": {{"x": 100, "y": 100}}}}
@@ -42,11 +50,6 @@ CRITICAL REQUIREMENTS:
 - When REMOVING nodes, also remove all edges connected to those nodes
 - Preserve node IDs for existing nodes that aren't being removed
 - DO NOT add any explanation, ONLY return the JSON
-
-EXAMPLE REMOVE:
-Current has node: {{"id": "node_3", "data": {{"label": "Redis Cache"}}}}
-Request: "remove cache"
-Result: Delete node_3 AND any edges with source=node_3 or target=node_3
 
 Return the complete modified diagram JSON now:
 """
@@ -64,13 +67,12 @@ Return the complete modified diagram JSON now:
             logger.info(f"🔧 Starting modification: '{modification_request}'")
             logger.info(f"📊 Current diagram has {len(current_diagram.get('nodes', []))} nodes")
             
-            # Check if it's a simple remove operation - use fallback for reliability
-            if self._is_simple_remove(modification_request):
-                logger.info("🎯 Detected simple REMOVE operation - using direct method")
-                return self._apply_simple_remove(current_diagram, modification_request)
+            # Prepare conversation history for prompt
+            conversation_history_str = json.dumps(conversation_history, indent=2) if conversation_history else "[]"
             
-            # For complex modifications, use AI
+            # Construct prompt with history
             prompt = self.modification_prompt_template.format(
+                conversation_history=conversation_history_str,
                 current_diagram=json.dumps(current_diagram, indent=2),
                 modification_request=modification_request
             )
@@ -108,56 +110,6 @@ Return the complete modified diagram JSON now:
         except Exception as e:
             logger.error(f"❌ Modification error: {str(e)}", exc_info=True)
             return current_diagram
-    
-    def _is_simple_remove(self, request: str) -> bool:
-        """Check if this is a simple remove operation"""
-        request_lower = request.lower()
-        remove_keywords = ["remove", "delete", "drop", "eliminate"]
-        return any(keyword in request_lower for keyword in remove_keywords)
-    
-    def _apply_simple_remove(self, diagram: Dict, request: str) -> Dict:
-        """Apply simple remove operation directly without AI"""
-        nodes = diagram.get("nodes", []).copy()
-        edges = diagram.get("edges", []).copy()
-        
-        # Extract what to remove
-        request_lower = request.lower()
-        for keyword in ["remove", "delete", "drop", "eliminate"]:
-            if keyword in request_lower:
-                # Get the component name to remove
-                component_to_remove = request_lower.replace(keyword, "").strip()
-                break
-        else:
-            component_to_remove = request_lower
-        
-        logger.info(f"🎯 Removing component matching: '{component_to_remove}'")
-        
-        # Find nodes to remove
-        nodes_to_remove = []
-        for node in nodes:
-            label = node.get("data", {}).get("label", "").lower()
-            if component_to_remove in label:
-                nodes_to_remove.append(node["id"])
-                logger.info(f"   ❌ Marking for removal: {node['id']} - {node.get('data', {}).get('label')}")
-        
-        if not nodes_to_remove:
-            logger.warning(f"⚠️ No nodes found matching '{component_to_remove}'")
-            return diagram
-        
-        # Remove nodes
-        nodes = [n for n in nodes if n["id"] not in nodes_to_remove]
-        logger.info(f"✂️ Removed {len(nodes_to_remove)} nodes")
-        
-        # Remove connected edges
-        initial_edge_count = len(edges)
-        edges = [
-            e for e in edges 
-            if e.get("source") not in nodes_to_remove and e.get("target") not in nodes_to_remove
-        ]
-        removed_edges = initial_edge_count - len(edges)
-        logger.info(f"✂️ Removed {removed_edges} connected edges")
-        
-        return {"nodes": nodes, "edges": edges}
     
     def _extract_json_from_response(self, response_text: str) -> Dict:
         """Extract JSON from AI response (handles markdown code blocks)"""
