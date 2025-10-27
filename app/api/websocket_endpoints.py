@@ -1,6 +1,5 @@
-# app/api/websocket_endpoints.py
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
-from typing import Dict, List
+from typing import Dict, List, Any
 import json
 from datetime import datetime
 from uuid import UUID
@@ -24,7 +23,6 @@ analyzer_service = analyzer.ArchitectureAnalyzer()
 diagram_gen_service = diagram_generator.DiagramGenerator()
 modifier_service = DiagramModifier()
 
-
 class ConnectionManager:
     """Manages WebSocket connections"""
     
@@ -45,9 +43,7 @@ class ConnectionManager:
         if client_id in self.active_connections:
             await self.active_connections[client_id].send_json(message)
 
-
 manager = ConnectionManager()
-
 
 async def load_conversation_memory(db: SessionLocal, thread_id: UUID, limit: int = 10) -> List[Dict]:
     """Load previous conversations for context"""
@@ -63,7 +59,6 @@ async def load_conversation_memory(db: SessionLocal, thread_id: UUID, limit: int
         })
     
     return sorted(memory, key=lambda x: x["version"])
-
 
 async def build_context_from_memory(memory: List[Dict]) -> Dict:
     """Build enriched context from conversation history"""
@@ -103,13 +98,11 @@ async def build_context_from_memory(memory: List[Dict]) -> Dict:
         ]
     }
 
-
 def get_latest_diagram(conversation_memory: List[Dict]) -> Dict:
     """Get the most recent diagram from memory"""
     if not conversation_memory:
         return {}
     return conversation_memory[-1].get("diagram_json", {})
-
 
 @router.websocket("/ws/architecture/{client_id}")
 async def websocket_architecture_endpoint(
@@ -267,7 +260,7 @@ async def websocket_architecture_endpoint(
                     logger.info(f"   - Edges: {len(current_diagram.get('edges', []))}")
                     logger.info(f"📚 Conversation history: {len(conversation_memory)} versions")
                     
-                    # ✅ Pass conversation history for context
+                    # Apply modification
                     modified_diagram = modifier_service.apply_modification(
                         current_diagram, 
                         modification_request,
@@ -280,7 +273,7 @@ async def websocket_architecture_endpoint(
                         logger.info(f"      • {node['id']}: {node.get('data', {}).get('label', 'No label')}")
                     logger.info(f"   - Edges: {len(modified_diagram.get('edges', []))}")
                     
-                    # ✅ Get modification summary
+                    # Get modification summary
                     modification_summary = modifier_service.get_modification_summary(
                         current_diagram,
                         modified_diagram
@@ -291,6 +284,16 @@ async def websocket_architecture_endpoint(
                     if modification_summary.get("updated_details"):
                         for detail in modification_summary["updated_details"]:
                             logger.info(f"   Updated: '{detail['old']}' → '{detail['new']}'")
+                    
+                    # Validate metadata before saving
+                    if "metadata" not in modified_diagram:
+                        modified_diagram["metadata"] = {
+                            "domain": current_diagram.get("metadata", {}).get("domain", "unknown"),
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "edge_count": len(modified_diagram.get("edges", [])),
+                            "node_count": len(modified_diagram.get("nodes", [])),
+                            "diagram_type": current_diagram.get("metadata", {}).get("diagram_type", "architecture")
+                        }
                     
                     # Save modified version
                     conversation_data = models.ConversationCreate(
@@ -304,7 +307,7 @@ async def websocket_architecture_endpoint(
                         conversation_data=conversation_data
                     )
                     
-                    # ✅ Update memory BEFORE incrementing version
+                    # Update memory
                     conversation_memory.append({
                         "version": conversation.version,
                         "diagram_json": modified_diagram,
@@ -314,7 +317,7 @@ async def websocket_architecture_endpoint(
                     
                     current_version += 1
                     
-                    # ✅ Rebuild memory context
+                    # Rebuild memory context
                     memory_context = await build_context_from_memory(conversation_memory)
                     
                     await manager.send_message(client_id, {
@@ -395,6 +398,16 @@ async def websocket_architecture_endpoint(
                             description, context, {}
                         )
                     
+                    # Ensure metadata is present
+                    if "metadata" not in diagram_data:
+                        diagram_data["metadata"] = {
+                            "domain": context.get("domain", "unknown"),
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "edge_count": len(diagram_data.get("edges", [])),
+                            "node_count": len(diagram_data.get("nodes", [])),
+                            "diagram_type": diagram_type
+                        }
+                    
                     # Ensure thread exists
                     if not current_thread_id:
                         thread_name = f"Architecture Chat {datetime.now().strftime('%Y-%m-%d %H:%M')}"
@@ -417,7 +430,7 @@ async def websocket_architecture_endpoint(
                         conversation_data=conversation_data
                     )
                     
-                    # ✅ Update memory
+                    # Update memory
                     conversation_memory.append({
                         "version": conversation.version,
                         "diagram_json": diagram_data,
@@ -427,7 +440,7 @@ async def websocket_architecture_endpoint(
                     
                     current_version += 1
                     
-                    # ✅ Build memory context
+                    # Build memory context
                     memory_context = await build_context_from_memory(conversation_memory)
                     
                     await manager.send_message(client_id, {
@@ -481,6 +494,16 @@ async def websocket_architecture_endpoint(
                             current_analysis["extracted_context"],
                             clarification_responses
                         )
+                    
+                    # Ensure metadata is present
+                    if "metadata" not in diagram_data:
+                        diagram_data["metadata"] = {
+                            "domain": current_analysis["extracted_context"].get("domain", "unknown"),
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "edge_count": len(diagram_data.get("edges", [])),
+                            "node_count": len(diagram_data.get("nodes", [])),
+                            "diagram_type": diagram_type
+                        }
                     
                     # Ensure thread exists
                     if not current_thread_id:

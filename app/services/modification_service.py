@@ -1,10 +1,10 @@
-# app/services/modification_service.py
 from typing import Dict, List, Any
 import google.generativeai as genai
 import json
 import os
 import logging
 import re
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +42,16 @@ CONTEXT INSTRUCTIONS:
 - Use the conversation history to understand previous versions and maintain consistency
 - Ensure modifications align with the architectural context from past versions
 - Avoid duplicating components unnecessarily based on history
+- Preserve the metadata section, updating edge_count, node_count, and timestamp as needed
+- If no metadata exists, create it with inferred domain, current timestamp, and diagram_type from current_diagram
 
 CRITICAL REQUIREMENTS:
-- Return ONLY valid JSON in this EXACT format: {{"nodes": [...], "edges": [...]}}
-- Each node MUST have: {{"id": "node_X", "type": "custom", "data": {{"label": "...", "type": "..."}}, "position": {{"x": 100, "y": 100}}}}
-- Each edge MUST have: {{"id": "edge_X", "source": "node_X", "target": "node_Y", "type": "smoothstep", "label": "uses", "animated": false}}
+- Return ONLY valid JSON in this EXACT format: {{"nodes": [...], "edges": [...], "metadata": {{...}}}}
+- Each node MUST have: {{"id": "node_X", "type": "custom", "data": {{"label": "...", "image": "...", "description": "..."}}, "position": {{"x": 100, "y": 100}}}}
+- Each edge MUST have: {{"id": "edge_X", "source": "node_X", "target": "node_Y", "type": "default", "label": "uses"}}
 - When REMOVING nodes, also remove all edges connected to those nodes
 - Preserve node IDs for existing nodes that aren't being removed
+- Update metadata with current edge_count, node_count, timestamp, and preserve or infer domain and diagram_type
 - DO NOT add any explanation, ONLY return the JSON
 
 Return the complete modified diagram JSON now:
@@ -99,6 +102,23 @@ Return the complete modified diagram JSON now:
                 logger.error(f"Response was: {response_text}")
                 return current_diagram
             
+            # Ensure metadata is present
+            if "metadata" not in modified_diagram:
+                modified_diagram["metadata"] = {
+                    "domain": current_diagram.get("metadata", {}).get("domain", "unknown"),
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "edge_count": len(modified_diagram.get("edges", [])),
+                    "node_count": len(modified_diagram.get("nodes", [])),
+                    "diagram_type": current_diagram.get("metadata", {}).get("diagram_type", "architecture")
+                }
+            else:
+                # Update metadata counts and timestamp
+                modified_diagram["metadata"].update({
+                    "edge_count": len(modified_diagram.get("edges", [])),
+                    "node_count": len(modified_diagram.get("nodes", [])),
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+            
             # Validate structure
             if not self._validate_diagram_structure(modified_diagram):
                 logger.error("❌ Invalid diagram structure from AI")
@@ -144,8 +164,8 @@ Return the complete modified diagram JSON now:
             logger.error("Diagram is not a dict")
             return False
         
-        if "nodes" not in diagram or "edges" not in diagram:
-            logger.error("Missing 'nodes' or 'edges' key")
+        if "nodes" not in diagram or "edges" not in diagram or "metadata" not in diagram:
+            logger.error("Missing 'nodes', 'edges', or 'metadata' key")
             return False
         
         if not isinstance(diagram["nodes"], list):
@@ -156,26 +176,32 @@ Return the complete modified diagram JSON now:
             logger.error("'edges' is not a list")
             return False
         
+        if not isinstance(diagram["metadata"], dict):
+            logger.error("'metadata' is not a dict")
+            return False
+        
         # Validate each node has required fields
         for i, node in enumerate(diagram["nodes"]):
             if not isinstance(node, dict):
                 logger.error(f"Node {i} is not a dict")
                 return False
             
-            if "id" not in node:
-                logger.error(f"Node {i} missing 'id'")
+            if "id" not in node or "type" not in node or "data" not in node or "position" not in node:
+                logger.error(f"Node {i} missing required fields")
                 return False
             
-            if "data" not in node or not isinstance(node["data"], dict):
-                logger.error(f"Node {i} missing or invalid 'data'")
-                return False
-            
-            if "label" not in node["data"]:
+            if not isinstance(node["data"], dict) or "label" not in node["data"]:
                 logger.error(f"Node {i} missing 'label' in data")
                 return False
+        
+        # Validate each edge has required fields and type
+        for i, edge in enumerate(diagram["edges"]):
+            if not isinstance(edge, dict):
+                logger.error(f"Edge {i} is not a dict")
+                return False
             
-            if "position" not in node:
-                logger.error(f"Node {i} missing 'position'")
+            if "id" not in edge or "source" not in edge or "target" not in edge or "type" not in edge or edge["type"] != "default":
+                logger.error(f"Edge {i} missing required fields or invalid type")
                 return False
         
         logger.info(f"✅ Validation passed: {len(diagram['nodes'])} nodes, {len(diagram['edges'])} edges")
