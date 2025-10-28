@@ -1,28 +1,31 @@
-# app/api/websocket_endpoints.py
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
-from typing import Dict, List
+from typing import Dict, List, Any
 import json
 from datetime import datetime
 from uuid import UUID
 import logging
-import json
 
 from app.database import get_db, SessionLocal
 from app.services import analyzer, diagram_generator
+from app.services.modification_service import DiagramModifier
 from app.services.thread_services import (
     create_thread, get_thread, create_conversation, 
     get_conversations
 )
 from app.api.dependencies import get_current_user_from_websocket
 from app.core import models
+from constants.constants import AWS_AVAILABLE_IMAGES, AZURE_AVAILABLE_IMAGES, local_images
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# Available icons for architecture diagrams
+AVAILABLE_ICONS = AWS_AVAILABLE_IMAGES + AZURE_AVAILABLE_IMAGES + local_images
+
 # Service instances
 analyzer_service = analyzer.ArchitectureAnalyzer()
 diagram_gen_service = diagram_generator.DiagramGenerator()
-
+modifier_service = DiagramModifier()
 
 class ConnectionManager:
     """Manages WebSocket connections"""
@@ -44,9 +47,7 @@ class ConnectionManager:
         if client_id in self.active_connections:
             await self.active_connections[client_id].send_json(message)
 
-
 manager = ConnectionManager()
-
 
 async def load_conversation_memory(db: SessionLocal, thread_id: UUID, limit: int = 10) -> List[Dict]:
     """Load previous conversations for context"""
@@ -62,7 +63,6 @@ async def load_conversation_memory(db: SessionLocal, thread_id: UUID, limit: int
         })
     
     return sorted(memory, key=lambda x: x["version"])
-
 
 async def build_context_from_memory(memory: List[Dict]) -> Dict:
     """Build enriched context from conversation history"""
@@ -102,6 +102,11 @@ async def build_context_from_memory(memory: List[Dict]) -> Dict:
         ]
     }
 
+def get_latest_diagram(conversation_memory: List[Dict]) -> Dict:
+    """Get the most recent diagram from memory"""
+    if not conversation_memory:
+        return {}
+    return conversation_memory[-1].get("diagram_json", {})
 
 @router.websocket("/ws/architecture/{client_id}")
 async def websocket_architecture_endpoint(
@@ -125,7 +130,7 @@ async def websocket_architecture_endpoint(
     try:
         await manager.send_message(client_id, {
             "type": "connected",
-            "message": "✨ WebSocket connected! I'm your AI architect with memory.",
+            "message": "✅ Connection established. Gunevo ArchitectX is now live, shaping ideas into intelligent architecture",
             "timestamp": datetime.now().isoformat()
         })
         
@@ -210,6 +215,9 @@ async def websocket_architecture_endpoint(
                 current_thread_id = thread_id
                 current_version = len(conversation_memory)
                 
+                # Send the latest diagram if exists
+                latest_diagram = get_latest_diagram(conversation_memory) if conversation_memory else None
+                
                 await manager.send_message(client_id, {
                     "type": "thread_loaded",
                     "thread_id": str(thread_id),
@@ -217,10 +225,141 @@ async def websocket_architecture_endpoint(
                     "version": current_version,
                     "memory_context": memory_context,
                     "conversations": conversation_memory,
+                    "latest_diagram": latest_diagram,
                     "message": f"🔄 Loaded thread with {len(conversation_memory)} previous versions"
                 })
             
-            # Handle analysis request
+            # Handle modification requests
+            elif message_type == "modify":
+                if not current_user or not current_thread_id:
+                    await manager.send_message(client_id, {
+                        "type": "error",
+                        "message": "Please create or load a thread first"
+                    })
+                    continue
+                
+                if not conversation_memory:
+                    await manager.send_message(client_id, {
+                        "type": "error",
+                        "message": "No diagram exists yet. Use 'analyze' to create the first version."
+                    })
+                    continue
+                
+                modification_request = data.get("modification", "")
+                
+                await manager.send_message(client_id, {
+                    "type": "processing",
+                    "message": "🔧 Modifying your diagram with AI context..."
+                })
+                
+                try:
+                    # Get current diagram
+                    current_diagram = get_latest_diagram(conversation_memory)
+                    
+                    logger.info(f"🔧 Starting modification request: '{modification_request}'")
+                    logger.info(f"📊 Current diagram state:")
+                    logger.info(f"   - Nodes: {len(current_diagram.get('nodes', []))}")
+                    for node in current_diagram.get('nodes', []):
+                        logger.info(f"      • {node['id']}: {node.get('data', {}).get('label', 'No label')}")
+                    logger.info(f"   - Edges: {len(current_diagram.get('edges', []))}")
+                    logger.info(f"📚 Conversation history: {len(conversation_memory)} versions")
+                    
+                    # Apply modification with available icons
+                    modified_diagram = modifier_service.apply_modification(
+                        current_diagram, 
+                        modification_request,
+                        conversation_history=conversation_memory,
+                        available_icons=AVAILABLE_ICONS
+                    )
+                    
+                    logger.info(f"📊 Modified diagram state:")
+                    logger.info(f"   - Nodes: {len(modified_diagram.get('nodes', []))}")
+                    for node in modified_diagram.get('nodes', []):
+                        logger.info(f"      • {node['id']}: {node.get('data', {}).get('label', 'No label')}")
+                    logger.info(f"   - Edges: {len(modified_diagram.get('edges', []))}")
+                    
+                    # Get modification summary
+                    modification_summary = modifier_service.get_modification_summary(
+                        current_diagram,
+                        modified_diagram
+                    )
+                    
+                    # Log the modification for debugging
+                    logger.info(f"📝 Modification summary: {modification_summary}")
+                    if modification_summary.get("updated_details"):
+                        diagram_type = modification_summary.get("diagram_type", "architecture")
+                        for detail in modification_summary["updated_details"]:
+                            if diagram_type == "db_diagram":
+                                # Database diagram updates
+                                table_name = detail.get("table", detail.get("id"))
+                                fields_added = detail.get("fields_added", [])
+                                fields_removed = detail.get("fields_removed", [])
+                                if fields_added:
+                                    logger.info(f"   Table '{table_name}': Added fields {fields_added}")
+                                if fields_removed:
+                                    logger.info(f"   Table '{table_name}': Removed fields {fields_removed}")
+                            else:
+                                # Architecture diagram updates
+                                logger.info(f"   Updated: '{detail.get('old', 'N/A')}' → '{detail.get('new', 'N/A')}'")
+                    
+                    # Validate metadata before saving
+                    if "metadata" not in modified_diagram:
+                        modified_diagram["metadata"] = {
+                            "domain": current_diagram.get("metadata", {}).get("domain", "unknown"),
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "edge_count": len(modified_diagram.get("edges", [])),
+                            "node_count": len(modified_diagram.get("nodes", [])),
+                            "diagram_type": current_diagram.get("metadata", {}).get("diagram_type", "architecture")
+                        }
+                    
+                    # Save modified version
+                    conversation_data = models.ConversationCreate(
+                        thread_id=current_thread_id,
+                        version=current_version,
+                        diagram_json=modified_diagram
+                    )
+                    conversation = create_conversation(
+                        db=db,
+                        thread_id=current_thread_id,
+                        conversation_data=conversation_data
+                    )
+                    
+                    # Update memory
+                    conversation_memory.append({
+                        "version": conversation.version,
+                        "diagram_json": modified_diagram,
+                        "created_at": conversation.created_at.isoformat(),
+                        "conversation_id": str(conversation.conversation_id)
+                    })
+                    
+                    current_version += 1
+                    
+                    # Rebuild memory context
+                    memory_context = await build_context_from_memory(conversation_memory)
+                    
+                    await manager.send_message(client_id, {
+                        "type": "diagram_modified",
+                        "diagram": modified_diagram,
+                        "version": current_version - 1,
+                        "modification": modification_request,
+                        "modification_summary": modification_summary,
+                        "memory_context": memory_context,
+                        "metadata": {
+                            "node_count": len(modified_diagram.get("nodes", [])),
+                            "edge_count": len(modified_diagram.get("edges", [])),
+                            "is_modification": True
+                        },
+                        "message": f"✅ Diagram modified! Version {current_version - 1}"
+                    })
+                
+                except Exception as e:
+                    logger.error(f"Modification error: {str(e)}", exc_info=True)
+                    await manager.send_message(client_id, {
+                        "type": "error",
+                        "message": f"Failed to modify diagram: {str(e)}"
+                    })
+            
+            # Handle analysis request (only for first version)
             elif message_type == "analyze":
                 if not current_user:
                     await manager.send_message(client_id, {
@@ -237,26 +376,8 @@ async def websocket_architecture_endpoint(
                     "message": "🔍 Analyzing your project..."
                 })
                 
-                # Build context with memory
-                memory_context = await build_context_from_memory(conversation_memory)
-                enhanced_description = description
-                
-                if memory_context:
-                    enhanced_description = f"""
-Current Request: {description}
-
-Previous Context:
-- Total versions: {memory_context.get('previous_versions', 0)}
-- Technologies used: {', '.join(memory_context.get('technologies_used', [])[:10])}
-- Previous components: {memory_context.get('total_components', 0)}
-
-Please consider the evolution history and build upon previous designs.
-"""
-                
-                context = analyzer_service.analyze_context(enhanced_description)
-                context["memory_context"] = memory_context
-                
-                completeness = analyzer_service.calculate_completeness(context, enhanced_description)
+                context = analyzer_service.analyze_context(description)
+                completeness = analyzer_service.calculate_completeness(context, description)
                 needs_clarification = completeness < 0.6
                 
                 current_analysis = {
@@ -294,29 +415,57 @@ Please consider the evolution history and build upon previous designs.
                             description, context, {}
                         )
                     
-                    if current_thread_id:
-                        conversation_data = models.ConversationCreate(
-                            version=current_version,
-                            diagram_json=diagram_data
+                    # Ensure metadata is present
+                    if "metadata" not in diagram_data:
+                        diagram_data["metadata"] = {
+                            "domain": context.get("domain", "unknown"),
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "edge_count": len(diagram_data.get("edges", [])),
+                            "node_count": len(diagram_data.get("nodes", [])),
+                            "diagram_type": diagram_type
+                        }
+                    
+                    # Ensure thread exists
+                    if not current_thread_id:
+                        thread_name = f"Architecture Chat {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                        thread_data = models.ThreadCreate(
+                            user_id=current_user.id,
+                            thread_name=thread_name
                         )
-                        conversation = create_conversation(
-                            db=db,
-                            thread_id=current_thread_id,
-                            conversation_data=conversation_data
-                        )
-                        current_version += 1
-                        
-                        conversation_memory.append({
-                            "version": conversation.version,
-                            "diagram_json": diagram_data,
-                            "created_at": conversation.created_at.isoformat(),
-                            "conversation_id": str(conversation.conversation_id)
-                        })
+                        thread = create_thread(db=db, thread_data=thread_data)
+                        current_thread_id = thread.thread_id
+                        current_version = 0
+                    
+                    conversation_data = models.ConversationCreate(
+                        thread_id=current_thread_id,
+                        version=current_version,
+                        diagram_json=diagram_data
+                    )
+                    conversation = create_conversation(
+                        db=db,
+                        thread_id=current_thread_id,
+                        conversation_data=conversation_data
+                    )
+                    
+                    # Update memory
+                    conversation_memory.append({
+                        "version": conversation.version,
+                        "diagram_json": diagram_data,
+                        "created_at": conversation.created_at.isoformat(),
+                        "conversation_id": str(conversation.conversation_id)
+                    })
+                    
+                    current_version += 1
+                    
+                    # Build memory context
+                    memory_context = await build_context_from_memory(conversation_memory)
                     
                     await manager.send_message(client_id, {
                         "type": "diagram_generated",
                         "diagram": diagram_data,
                         "version": current_version - 1,
+                        "thread_id": str(current_thread_id),
+                        "memory_context": memory_context,
                         "metadata": {
                             "node_count": len(diagram_data.get("nodes", [])),
                             "edge_count": len(diagram_data.get("edges", [])),
@@ -363,29 +512,57 @@ Please consider the evolution history and build upon previous designs.
                             clarification_responses
                         )
                     
-                    if current_thread_id:
-                        conversation_data = models.ConversationCreate(
-                            version=current_version,
-                            diagram_json=diagram_data
+                    # Ensure metadata is present
+                    if "metadata" not in diagram_data:
+                        diagram_data["metadata"] = {
+                            "domain": current_analysis["extracted_context"].get("domain", "unknown"),
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "edge_count": len(diagram_data.get("edges", [])),
+                            "node_count": len(diagram_data.get("nodes", [])),
+                            "diagram_type": diagram_type
+                        }
+                    
+                    # Ensure thread exists
+                    if not current_thread_id:
+                        t_name = "Architecture" if diagram_type == "architecture" else "Database"
+                        thread_name = f"{t_name} Chat {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                        thread_data = models.ThreadCreate(
+                            user_id=current_user.id,
+                            thread_name=thread_name
                         )
-                        conversation = create_conversation(
-                            db=db,
-                            thread_id=current_thread_id,
-                            conversation_data=conversation_data
-                        )
-                        current_version += 1
                         
-                        conversation_memory.append({
-                            "version": conversation.version,
-                            "diagram_json": diagram_data,
-                            "created_at": conversation.created_at.isoformat(),
-                            "conversation_id": str(conversation.conversation_id)
-                        })
+                        thread = create_thread(db=db, thread_data=thread_data)
+                        current_thread_id = thread.thread_id
+                        current_version = 0
+                    
+                    conversation_data = models.ConversationCreate(
+                        thread_id=current_thread_id,
+                        version=current_version,
+                        diagram_json=diagram_data
+                    )
+                    conversation = create_conversation(
+                        db=db,
+                        thread_id=current_thread_id,
+                        conversation_data=conversation_data
+                    )
+                    
+                    conversation_memory.append({
+                        "version": conversation.version,
+                        "diagram_json": diagram_data,
+                        "created_at": conversation.created_at.isoformat(),
+                        "conversation_id": str(conversation.conversation_id)
+                    })
+                    
+                    current_version += 1
+                    
+                    memory_context = await build_context_from_memory(conversation_memory)
                     
                     await manager.send_message(client_id, {
                         "type": "diagram_generated",
                         "diagram": diagram_data,
                         "version": current_version - 1,
+                        "thread_id": str(current_thread_id),
+                        "memory_context": memory_context,
                         "metadata": {
                             "node_count": len(diagram_data.get("nodes", [])),
                             "edge_count": len(diagram_data.get("edges", [])),
@@ -416,7 +593,7 @@ Please consider the evolution history and build upon previous designs.
         logger.info(f"Client {client_id} disconnected")
     
     except Exception as e:
-        logger.error(f"WebSocket error for client {client_id}: {str(e)}")
+        logger.error(f"WebSocket error for client {client_id}: {str(e)}", exc_info=True)
         try:
             await manager.send_message(client_id, {
                 "type": "error",
