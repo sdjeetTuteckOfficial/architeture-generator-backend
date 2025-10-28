@@ -524,11 +524,13 @@ async def websocket_architecture_endpoint(
                     
                     # Ensure thread exists
                     if not current_thread_id:
-                        thread_name = f"Architecture Chat {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                        t_name = "Architecture" if diagram_type == "architecture" else "Database"
+                        thread_name = f"{t_name} Chat {datetime.now().strftime('%Y-%m-%d %H:%M')}"
                         thread_data = models.ThreadCreate(
                             user_id=current_user.id,
                             thread_name=thread_name
                         )
+                        
                         thread = create_thread(db=db, thread_data=thread_data)
                         current_thread_id = thread.thread_id
                         current_version = 0
