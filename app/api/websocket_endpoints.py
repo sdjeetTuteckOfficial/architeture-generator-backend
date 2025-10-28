@@ -130,7 +130,7 @@ async def websocket_architecture_endpoint(
     try:
         await manager.send_message(client_id, {
             "type": "connected",
-            "message": "✨ WebSocket connected! I'm your AI architect with memory.",
+            "message": "✅ Connection established. Gunevo ArchitectX is now live, shaping ideas into intelligent architecture",
             "timestamp": datetime.now().isoformat()
         })
         
