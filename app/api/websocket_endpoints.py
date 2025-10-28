@@ -14,9 +14,13 @@ from app.services.thread_services import (
 )
 from app.api.dependencies import get_current_user_from_websocket
 from app.core import models
+from constants.constants import AWS_AVAILABLE_IMAGES, AZURE_AVAILABLE_IMAGES, local_images
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Available icons for architecture diagrams
+AVAILABLE_ICONS = AWS_AVAILABLE_IMAGES + AZURE_AVAILABLE_IMAGES + local_images
 
 # Service instances
 analyzer_service = analyzer.ArchitectureAnalyzer()
@@ -260,11 +264,12 @@ async def websocket_architecture_endpoint(
                     logger.info(f"   - Edges: {len(current_diagram.get('edges', []))}")
                     logger.info(f"📚 Conversation history: {len(conversation_memory)} versions")
                     
-                    # Apply modification
+                    # Apply modification with available icons
                     modified_diagram = modifier_service.apply_modification(
                         current_diagram, 
                         modification_request,
-                        conversation_history=conversation_memory
+                        conversation_history=conversation_memory,
+                        available_icons=AVAILABLE_ICONS
                     )
                     
                     logger.info(f"📊 Modified diagram state:")
@@ -282,8 +287,20 @@ async def websocket_architecture_endpoint(
                     # Log the modification for debugging
                     logger.info(f"📝 Modification summary: {modification_summary}")
                     if modification_summary.get("updated_details"):
+                        diagram_type = modification_summary.get("diagram_type", "architecture")
                         for detail in modification_summary["updated_details"]:
-                            logger.info(f"   Updated: '{detail['old']}' → '{detail['new']}'")
+                            if diagram_type == "db_diagram":
+                                # Database diagram updates
+                                table_name = detail.get("table", detail.get("id"))
+                                fields_added = detail.get("fields_added", [])
+                                fields_removed = detail.get("fields_removed", [])
+                                if fields_added:
+                                    logger.info(f"   Table '{table_name}': Added fields {fields_added}")
+                                if fields_removed:
+                                    logger.info(f"   Table '{table_name}': Removed fields {fields_removed}")
+                            else:
+                                # Architecture diagram updates
+                                logger.info(f"   Updated: '{detail.get('old', 'N/A')}' → '{detail.get('new', 'N/A')}'")
                     
                     # Validate metadata before saving
                     if "metadata" not in modified_diagram:
