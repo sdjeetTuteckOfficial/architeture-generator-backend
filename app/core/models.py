@@ -90,6 +90,7 @@ class ThreadResponse(ThreadBase):
     """Response schema - matches your actual database Thread model"""
     thread_id: UUID
     conversation_ids: List[UUID] = []
+    created_at: datetime
     
     class Config:
         from_attributes = True
