@@ -1,36 +1,41 @@
-from typing import Dict, List, Any
-import google.generativeai as genai
+from typing import Dict, List, Any, Optional
 import json
 import os
 import logging
 import re
 from datetime import datetime
 
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.prompts import ChatPromptTemplate
+from langchain.schema import SystemMessage, HumanMessage
+from langchain.memory import ConversationBufferMemory
+
 logger = logging.getLogger(__name__)
 
 class DiagramModifier:
-    """Service for intelligently modifying existing diagrams using AI"""
+    """Service for intelligently modifying existing diagrams using AI with LangChain"""
     
     def __init__(self):
-        # Initialize Gemini
+        # Initialize Gemini via LangChain
         api_key = os.getenv("GOOGLE_API_KEY")
         if not api_key:
             raise ValueError("GOOGLE_API_KEY not found in environment")
         
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-2.0-flash')
+        self.llm = ChatGoogleGenerativeAI(
+            model="gemini-2.0-flash",
+            google_api_key=api_key,
+            temperature=0.1,
+            convert_system_message_to_human=True
+        )
         
-        # Architecture diagram modification prompt
-        self.architecture_modification_prompt = """
-You are an expert system architect modifying architecture diagrams.
-
-CONVERSATION HISTORY:
-{conversation_history}
-
-CURRENT DIAGRAM (JSON):
-{current_diagram}
-
-USER REQUEST: "{modification_request}"
+        # Initialize memory for conversation context
+        self.memory = ConversationBufferMemory(
+            return_messages=True,
+            memory_key="chat_history"
+        )
+        
+        # Architecture diagram modification system prompt
+        self.architecture_system_prompt = """You are an expert system architect modifying architecture diagrams.
 
 MODIFICATION RULES:
 1. ADD: If request says "add X", create a new node for X with appropriate icon from available icons
@@ -39,7 +44,11 @@ MODIFICATION RULES:
 4. CONNECT: If request says "connect X to Y", add an edge between them
 5. If a component already exists, UPDATE it instead of creating duplicate
 
-AVAILABLE ICONS: {available_icons}
+POSITION PRESERVATION RULES (CRITICAL):
+- For EXISTING nodes that are NOT being removed, PRESERVE their exact position from the current diagram
+- Only assign new positions to newly added nodes
+- When a node exists in both old and new versions, copy its position exactly: {{"x": same_x, "y": same_y}}
+- This ensures the diagram layout remains stable across modifications
 
 CONTEXT INSTRUCTIONS:
 - Use the conversation history to understand previous versions and maintain consistency
@@ -55,23 +64,12 @@ CRITICAL REQUIREMENTS:
 - Each edge MUST have: {{"id": "edge_X", "source": "node_X", "target": "node_Y", "type": "default", "label": "uses"}}
 - When REMOVING nodes, also remove all edges connected to those nodes
 - Preserve node IDs for existing nodes that aren't being removed
+- **PRESERVE EXACT POSITIONS for all existing nodes that are not being removed**
 - Update metadata with current edge_count, node_count, timestamp, and preserve or infer domain and diagram_type
-- DO NOT add any explanation, ONLY return the JSON
-
-Return the complete modified diagram JSON now:
-"""
+- DO NOT add any explanation, ONLY return the JSON"""
         
-        # Database diagram modification prompt
-        self.database_modification_prompt = """
-You are an expert database architect modifying database schema diagrams.
-
-CONVERSATION HISTORY:
-{conversation_history}
-
-CURRENT DATABASE SCHEMA (JSON):
-{current_diagram}
-
-USER REQUEST: "{modification_request}"
+        # Database diagram modification system prompt
+        self.database_system_prompt = """You are an expert database architect modifying database schema diagrams.
 
 MODIFICATION RULES:
 1. ADD TABLE: If request says "add [table_name] table", create a new table node with appropriate fields
@@ -81,6 +79,12 @@ MODIFICATION RULES:
 5. ADD RELATIONSHIP: If request says "relate [table1] to [table2]", add a foreign key field and create an edge
 6. MODIFY COLUMN: If request says "change [column_name] in [table_name]", update that field's properties
 7. If a table already exists, UPDATE it instead of creating duplicate
+
+POSITION PRESERVATION RULES (CRITICAL):
+- For EXISTING tables that are NOT being removed, PRESERVE their exact position from the current schema
+- Only assign new positions to newly added tables
+- When a table exists in both old and new versions, copy its position exactly: {{"x": same_x, "y": same_y}}
+- This ensures the schema diagram layout remains stable across modifications
 
 CONTEXT INSTRUCTIONS:
 - Use the conversation history to understand the schema evolution
@@ -126,22 +130,21 @@ CRITICAL REQUIREMENTS:
 - Foreign key fields must have "references" pointing to "table_id.column_name"
 - When adding foreign keys, create the corresponding edge from parent to child
 - When removing tables, remove all edges connected to that table
+- **PRESERVE EXACT POSITIONS for all existing tables that are not being removed**
 - Update metadata with current edge_count, node_count, timestamp, and diagram_type="db_diagram"
-- DO NOT add any explanation, ONLY return the JSON
-
-Return the complete modified database schema JSON now:
-"""
+- DO NOT add any explanation, ONLY return the JSON"""
     
     def apply_modification(
         self, 
         current_diagram: Dict, 
         modification_request: str,
-        conversation_history: List[Dict] = None,
-        available_icons: List[str] = None
+        conversation_history: Optional[List[Dict]] = None,
+        available_icons: Optional[List[str]] = None
     ) -> Dict:
         """
         Apply modifications to diagram using AI with full context.
         Automatically detects diagram type and uses appropriate modification strategy.
+        Preserves node positions for existing nodes when memory data exists.
         """
         try:
             # Detect diagram type
@@ -149,43 +152,39 @@ Return the complete modified database schema JSON now:
             logger.info(f"🔧 Starting {diagram_type} modification: '{modification_request}'")
             logger.info(f"📊 Current diagram has {len(current_diagram.get('nodes', []))} nodes")
             
-            # Prepare conversation history for prompt
-            conversation_history_str = json.dumps(conversation_history, indent=2) if conversation_history else "[]"
+            # Build position map for existing nodes
+            position_map = self._build_position_map(current_diagram)
             
-            # Select appropriate prompt template and prepare format args
+            # Select appropriate system prompt
             if diagram_type == "db_diagram":
-                prompt_template = self.database_modification_prompt
-                format_args = {
-                    "conversation_history": conversation_history_str,
-                    "current_diagram": json.dumps(current_diagram, indent=2),
-                    "modification_request": modification_request
-                }
+                system_prompt = self.database_system_prompt
             else:
-                prompt_template = self.architecture_modification_prompt
-                icons_str = json.dumps(available_icons) if available_icons else "[]"
-                format_args = {
-                    "conversation_history": conversation_history_str,
-                    "current_diagram": json.dumps(current_diagram, indent=2),
-                    "modification_request": modification_request,
-                    "available_icons": icons_str
-                }
+                system_prompt = self.architecture_system_prompt
             
-            # Construct prompt with history
-            prompt = prompt_template.format(**format_args)
+            # Build user message with context
+            user_message = self._build_user_message(
+                current_diagram=current_diagram,
+                modification_request=modification_request,
+                conversation_history=conversation_history,
+                available_icons=available_icons,
+                diagram_type=diagram_type
+            )
             
-            logger.info(f"🤖 Sending to Gemini AI ({diagram_type})...")
+            logger.info(f"🤖 Sending to Gemini AI via LangChain ({diagram_type})...")
             
             # Generate with AI - retry up to 3 times
             max_retries = 3
             for attempt in range(max_retries):
                 try:
-                    response = self.model.generate_content(
-                        prompt,
-                        generation_config=genai.types.GenerationConfig(
-                            temperature=0.1,  # Low temperature for consistent output
-                        )
-                    )
-                    response_text = response.text.strip()
+                    # Create messages
+                    messages = [
+                        SystemMessage(content=system_prompt),
+                        HumanMessage(content=user_message)
+                    ]
+                    
+                    # Get response from LLM
+                    response = self.llm.invoke(messages)
+                    response_text = response.content.strip()
                     
                     logger.info(f"📨 AI Response length: {len(response_text)} chars (attempt {attempt + 1}/{max_retries})")
                     
@@ -200,6 +199,11 @@ Return the complete modified database schema JSON now:
                             logger.error("❌ All retry attempts failed to extract JSON")
                             raise ValueError("Failed to extract valid JSON from AI response after all retries")
                     
+                    # Restore positions for existing nodes if memory data exists
+                    if conversation_history and position_map:
+                        modified_diagram = self._restore_node_positions(modified_diagram, position_map)
+                        logger.info(f"🔄 Restored positions for {len(position_map)} existing nodes")
+                    
                     # Validate structure based on diagram type
                     if not self._validate_diagram_structure(modified_diagram, diagram_type):
                         logger.warning(f"⚠️ Invalid diagram structure from AI (attempt {attempt + 1}/{max_retries})")
@@ -210,22 +214,13 @@ Return the complete modified database schema JSON now:
                             raise ValueError("AI generated invalid diagram structure after all retries")
                     
                     # Ensure metadata is present and correct
-                    if "metadata" not in modified_diagram:
-                        modified_diagram["metadata"] = {
-                            "domain": current_diagram.get("metadata", {}).get("domain", "unknown"),
-                            "timestamp": datetime.utcnow().isoformat(),
-                            "edge_count": len(modified_diagram.get("edges", [])),
-                            "node_count": len(modified_diagram.get("nodes", [])),
-                            "diagram_type": diagram_type
-                        }
-                    else:
-                        # Update metadata counts and timestamp
-                        modified_diagram["metadata"].update({
-                            "edge_count": len(modified_diagram.get("edges", [])),
-                            "node_count": len(modified_diagram.get("nodes", [])),
-                            "timestamp": datetime.utcnow().isoformat(),
-                            "diagram_type": diagram_type
-                        })
+                    modified_diagram = self._ensure_metadata(modified_diagram, current_diagram, diagram_type)
+                    
+                    # Save to memory
+                    self.memory.save_context(
+                        {"input": modification_request},
+                        {"output": f"Modified {diagram_type}: {len(modified_diagram.get('nodes', []))} nodes"}
+                    )
                     
                     logger.info(f"✅ Successfully modified! New diagram has {len(modified_diagram.get('nodes', []))} nodes")
                     return modified_diagram
@@ -240,8 +235,65 @@ Return the complete modified database schema JSON now:
             
         except Exception as e:
             logger.error(f"❌ Modification error: {str(e)}", exc_info=True)
-            # Return current diagram unchanged on error
             raise Exception(f"Failed to modify diagram: {str(e)}")
+    
+    def _build_position_map(self, diagram: Dict) -> Dict[str, Dict]:
+        """Build a map of node IDs to their positions"""
+        position_map = {}
+        for node in diagram.get("nodes", []):
+            node_id = node.get("id")
+            position = node.get("position")
+            if node_id and position:
+                position_map[node_id] = position.copy()
+        
+        logger.info(f"📍 Built position map for {len(position_map)} nodes")
+        return position_map
+    
+    def _restore_node_positions(self, modified_diagram: Dict, position_map: Dict[str, Dict]) -> Dict:
+        """Restore positions for existing nodes from the position map"""
+        restored_count = 0
+        for node in modified_diagram.get("nodes", []):
+            node_id = node.get("id")
+            if node_id in position_map:
+                node["position"] = position_map[node_id].copy()
+                restored_count += 1
+        
+        logger.info(f"✅ Restored positions for {restored_count}/{len(position_map)} existing nodes")
+        return modified_diagram
+    
+    def _build_user_message(
+        self,
+        current_diagram: Dict,
+        modification_request: str,
+        conversation_history: Optional[List[Dict]],
+        available_icons: Optional[List[str]],
+        diagram_type: str
+    ) -> str:
+        """Build the user message with all context"""
+        
+        # Format conversation history
+        history_str = ""
+        if conversation_history:
+            history_str = "CONVERSATION HISTORY:\n"
+            history_str += json.dumps(conversation_history, indent=2)
+            history_str += "\n\n"
+        
+        # Format current diagram
+        diagram_str = f"CURRENT {'DATABASE SCHEMA' if diagram_type == 'db_diagram' else 'DIAGRAM'} (JSON):\n"
+        diagram_str += json.dumps(current_diagram, indent=2)
+        diagram_str += "\n\n"
+        
+        # Format available icons (for architecture diagrams only)
+        icons_str = ""
+        if diagram_type == "architecture" and available_icons:
+            icons_str = f"AVAILABLE ICONS: {json.dumps(available_icons)}\n\n"
+        
+        # Build complete message
+        message = f"{history_str}{diagram_str}{icons_str}"
+        message += f'USER REQUEST: "{modification_request}"\n\n'
+        message += "Return the complete modified diagram JSON now:"
+        
+        return message
     
     def _detect_diagram_type(self, diagram: Dict) -> str:
         """Detect whether this is an architecture or database diagram"""
@@ -266,7 +318,7 @@ Return the complete modified database schema JSON now:
         # Default to architecture
         return "architecture"
     
-    def _extract_json_from_response(self, response_text: str) -> Dict:
+    def _extract_json_from_response(self, response_text: str) -> Optional[Dict]:
         """Extract JSON from AI response (handles markdown code blocks)"""
         try:
             # Try direct parse
@@ -340,9 +392,6 @@ Return the complete modified database schema JSON now:
                     if "name" not in field or "type" not in field:
                         logger.error(f"Node {i} field {j} missing 'name' or 'type'")
                         return False
-            elif diagram_type == "architecture":
-                # Architecture nodes should have image (optional but common)
-                pass
         
         # Validate edges
         for i, edge in enumerate(diagram["edges"]):
@@ -356,6 +405,27 @@ Return the complete modified database schema JSON now:
         
         logger.info(f"✅ Validation passed ({diagram_type}): {len(diagram['nodes'])} nodes, {len(diagram['edges'])} edges")
         return True
+    
+    def _ensure_metadata(self, modified_diagram: Dict, current_diagram: Dict, diagram_type: str) -> Dict:
+        """Ensure metadata is present and up-to-date"""
+        if "metadata" not in modified_diagram:
+            modified_diagram["metadata"] = {
+                "domain": current_diagram.get("metadata", {}).get("domain", "unknown"),
+                "timestamp": datetime.utcnow().isoformat(),
+                "edge_count": len(modified_diagram.get("edges", [])),
+                "node_count": len(modified_diagram.get("nodes", [])),
+                "diagram_type": diagram_type
+            }
+        else:
+            # Update metadata counts and timestamp
+            modified_diagram["metadata"].update({
+                "edge_count": len(modified_diagram.get("edges", [])),
+                "node_count": len(modified_diagram.get("nodes", [])),
+                "timestamp": datetime.utcnow().isoformat(),
+                "diagram_type": diagram_type
+            })
+        
+        return modified_diagram
     
     def get_modification_summary(self, old_diagram: Dict, new_diagram: Dict) -> Dict:
         """Generate summary of what changed"""
@@ -447,3 +517,8 @@ Return the complete modified database schema JSON now:
                 logger.info(f"      - {detail['label']}")
         
         return summary
+    
+    def clear_memory(self):
+        """Clear the conversation memory"""
+        self.memory.clear()
+        logger.info("🧹 Cleared conversation memory")

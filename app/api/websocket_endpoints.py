@@ -1,9 +1,12 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import json
 from datetime import datetime
 from uuid import UUID
 import logging
+
+from langchain.memory import ConversationBufferMemory
+from langchain.schema import HumanMessage, AIMessage
 
 from app.database import get_db, SessionLocal
 from app.services import analyzer, diagram_generator
@@ -28,10 +31,12 @@ diagram_gen_service = diagram_generator.DiagramGenerator()
 modifier_service = DiagramModifier()
 
 class ConnectionManager:
-    """Manages WebSocket connections"""
+    """Manages WebSocket connections with LangChain memory per session"""
     
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
+        # Store memory per client/thread combination
+        self.memories: Dict[str, ConversationBufferMemory] = {}
     
     async def connect(self, websocket: WebSocket, client_id: str):
         await websocket.accept()
@@ -42,38 +47,104 @@ class ConnectionManager:
         if client_id in self.active_connections:
             del self.active_connections[client_id]
             logger.info(f"Client {client_id} disconnected")
+        
+        # Clean up memories for this client
+        keys_to_remove = [k for k in self.memories.keys() if k.startswith(f"{client_id}_")]
+        for key in keys_to_remove:
+            del self.memories[key]
     
     async def send_message(self, client_id: str, message: dict):
         if client_id in self.active_connections:
             await self.active_connections[client_id].send_json(message)
+    
+    def get_memory(self, client_id: str, thread_id: str) -> ConversationBufferMemory:
+        """Get or create memory for a specific client-thread combination"""
+        memory_key = f"{client_id}_{thread_id}"
+        
+        if memory_key not in self.memories:
+            self.memories[memory_key] = ConversationBufferMemory(
+                return_messages=True,
+                memory_key="chat_history",
+                output_key="output"
+            )
+            logger.info(f"Created new memory for {memory_key}")
+        
+        return self.memories[memory_key]
+    
+    def clear_memory(self, client_id: str, thread_id: str):
+        """Clear memory for a specific thread"""
+        memory_key = f"{client_id}_{thread_id}"
+        if memory_key in self.memories:
+            self.memories[memory_key].clear()
+            logger.info(f"Cleared memory for {memory_key}")
 
 manager = ConnectionManager()
 
-async def load_conversation_memory(db: SessionLocal, thread_id: UUID, limit: int = 10) -> List[Dict]:
-    """Load previous conversations for context"""
+async def load_conversation_memory_to_langchain(
+    db: SessionLocal, 
+    thread_id: UUID, 
+    memory: ConversationBufferMemory,
+    limit: int = 10
+) -> List[Dict]:
+    """
+    Load previous conversations into LangChain memory with SUMMARIES only.
+    Returns full diagram data separately for modification purposes.
+    """
     conversations = get_conversations(db=db, thread_id=thread_id, skip=0, limit=limit)
     
-    memory = []
+    memory_data = []
+    
     for conv in conversations:
-        memory.append({
+        diagram_json = conv.diagram_json
+        
+        # Extract metadata summary (NOT the full diagram)
+        if isinstance(diagram_json, dict):
+            node_count = len(diagram_json.get("nodes", []))
+            edge_count = len(diagram_json.get("edges", []))
+            diagram_type = diagram_json.get("metadata", {}).get("diagram_type", "architecture")
+            
+            # Get component names for context
+            component_names = [
+                node.get("data", {}).get("label", "Unknown")
+                for node in diagram_json.get("nodes", [])[:5]  # Only first 5
+            ]
+            
+            # Create a lightweight summary for LangChain memory
+            summary = f"Version {conv.version}: {diagram_type} with {node_count} components ({', '.join(component_names)}{'...' if node_count > 5 else ''})"
+            
+            # Add ONLY summary to LangChain memory (not full JSON!)
+            memory.chat_memory.add_user_message(
+                f"Diagram version {conv.version}"
+            )
+            memory.chat_memory.add_ai_message(summary)
+            
+        else:
+            # Fallback for non-dict diagrams
+            memory.chat_memory.add_user_message(f"Version {conv.version}")
+            memory.chat_memory.add_ai_message(f"Generated diagram version {conv.version}")
+        
+        # Store FULL diagram data separately (not in LangChain memory)
+        memory_data.append({
             "version": conv.version,
-            "diagram_json": conv.diagram_json,
+            "diagram_json": diagram_json,  # Full diagram for modifications
             "created_at": conv.created_at.isoformat(),
             "conversation_id": str(conv.conversation_id)
         })
     
-    return sorted(memory, key=lambda x: x["version"])
+    logger.info(f"Loaded {len(conversations)} conversation summaries into LangChain memory")
+    logger.info(f"Stored {len(memory_data)} full diagrams separately for modifications")
+    return sorted(memory_data, key=lambda x: x["version"])
 
-async def build_context_from_memory(memory: List[Dict]) -> Dict:
+async def build_context_from_memory(memory_data: List[Dict]) -> Dict:
     """Build enriched context from conversation history"""
-    if not memory:
+    if not memory_data:
         return {}
     
     all_nodes = []
     all_edges = []
     technologies = set()
     
-    for conv in memory:
+    for conv in memory_data:
         diagram = conv.get("diagram_json", {})
         if isinstance(diagram, dict):
             nodes = diagram.get("nodes", [])
@@ -88,7 +159,7 @@ async def build_context_from_memory(memory: List[Dict]) -> Dict:
                     technologies.add(label)
     
     return {
-        "previous_versions": len(memory),
+        "previous_versions": len(memory_data),
         "total_components": len(all_nodes),
         "total_connections": len(all_edges),
         "technologies_used": list(technologies),
@@ -98,7 +169,7 @@ async def build_context_from_memory(memory: List[Dict]) -> Dict:
                 "component_count": len(conv.get("diagram_json", {}).get("nodes", [])),
                 "created_at": conv["created_at"]
             }
-            for conv in memory
+            for conv in memory_data
         ]
     }
 
@@ -108,24 +179,49 @@ def get_latest_diagram(conversation_memory: List[Dict]) -> Dict:
         return {}
     return conversation_memory[-1].get("diagram_json", {})
 
+def prepare_conversation_history_for_modifier(memory_data: List[Dict]) -> List[Dict]:
+    """
+    Convert memory data to format expected by modifier service.
+    This includes ONLY the essential diagram structure for position preservation.
+    """
+    history = []
+    for conv in memory_data:
+        diagram = conv["diagram_json"]
+        
+        # Extract only what's needed: nodes with positions, edges, metadata
+        essential_diagram = {
+            "nodes": diagram.get("nodes", []),
+            "edges": diagram.get("edges", []),
+            "metadata": diagram.get("metadata", {})
+        }
+        
+        history.append({
+            "version": conv["version"],
+            "diagram_json": essential_diagram,
+            "timestamp": conv["created_at"]
+        })
+    
+    return history
+
 @router.websocket("/ws/architecture/{client_id}")
 async def websocket_architecture_endpoint(
     websocket: WebSocket,
     client_id: str,
     db: SessionLocal = Depends(get_db)
 ):
-    """WebSocket endpoint for real-time architecture diagram generation with memory"""
+    """WebSocket endpoint for real-time architecture diagram generation with LangChain memory"""
     
     await manager.connect(websocket, client_id)
     
     # Session state
     current_user = None
     current_thread_id = None
+    current_memory: Optional[ConversationBufferMemory] = None
     current_version = 0
     current_analysis = None
     clarification_responses = {}
     awaiting_clarification = False
-    conversation_memory = []
+    conversation_memory = []  # Stores FULL diagrams for modifications
     
     try:
         await manager.send_message(client_id, {
@@ -183,6 +279,9 @@ async def websocket_architecture_endpoint(
                 current_version = 0
                 conversation_memory = []
                 
+                # Initialize new memory for this thread
+                current_memory = manager.get_memory(client_id, str(current_thread_id))
+                
                 await manager.send_message(client_id, {
                     "type": "thread_created",
                     "thread_id": str(current_thread_id),
@@ -209,7 +308,13 @@ async def websocket_architecture_endpoint(
                     })
                     continue
                 
-                conversation_memory = await load_conversation_memory(db, thread_id, limit=20)
+                # Get or create memory for this thread
+                current_memory = manager.get_memory(client_id, str(thread_id))
+                
+                # Load conversation history: summaries to LangChain, full data to conversation_memory
+                conversation_memory = await load_conversation_memory_to_langchain(
+                    db, thread_id, current_memory, limit=20
+                )
                 memory_context = await build_context_from_memory(conversation_memory)
                 
                 current_thread_id = thread_id
@@ -231,7 +336,7 @@ async def websocket_architecture_endpoint(
             
             # Handle modification requests
             elif message_type == "modify":
-                if not current_user or not current_thread_id:
+                if not current_user or not current_thread_id or not current_memory:
                     await manager.send_message(client_id, {
                         "type": "error",
                         "message": "Please create or load a thread first"
@@ -253,7 +358,7 @@ async def websocket_architecture_endpoint(
                 })
                 
                 try:
-                    # Get current diagram
+                    # Get current diagram from conversation_memory (NOT from LangChain memory!)
                     current_diagram = get_latest_diagram(conversation_memory)
                     
                     logger.info(f"🔧 Starting modification request: '{modification_request}'")
@@ -264,11 +369,14 @@ async def websocket_architecture_endpoint(
                     logger.info(f"   - Edges: {len(current_diagram.get('edges', []))}")
                     logger.info(f"📚 Conversation history: {len(conversation_memory)} versions")
                     
-                    # Apply modification with available icons
+                    # Prepare history for modifier (with position preservation)
+                    history_for_modifier = prepare_conversation_history_for_modifier(conversation_memory)
+                    
+                    # Apply modification with full diagram history (NOT LangChain memory!)
                     modified_diagram = modifier_service.apply_modification(
                         current_diagram, 
                         modification_request,
-                        conversation_history=conversation_memory,
+                        conversation_history=history_for_modifier,
                         available_icons=AVAILABLE_ICONS
                     )
                     
@@ -312,7 +420,17 @@ async def websocket_architecture_endpoint(
                             "diagram_type": current_diagram.get("metadata", {}).get("diagram_type", "architecture")
                         }
                     
-                    # Save modified version
+                    # Save SUMMARY to LangChain memory (not full diagram!)
+                    node_count = len(modified_diagram.get("nodes", []))
+                    edge_count = len(modified_diagram.get("edges", []))
+                    summary = f"Modified diagram: {modification_summary.get('nodes_added', 0)} added, {modification_summary.get('nodes_removed', 0)} removed. Total: {node_count} nodes, {edge_count} edges"
+                    
+                    current_memory.save_context(
+                        {"input": modification_request},
+                        {"output": summary}
+                    )
+                    
+                    # Save modified version to database
                     conversation_data = models.ConversationCreate(
                         thread_id=current_thread_id,
                         version=current_version,
@@ -324,7 +442,7 @@ async def websocket_architecture_endpoint(
                         conversation_data=conversation_data
                     )
                     
-                    # Update memory
+                    # Update conversation_memory with FULL diagram
                     conversation_memory.append({
                         "version": conversation.version,
                         "diagram_json": modified_diagram,
@@ -435,6 +553,20 @@ async def websocket_architecture_endpoint(
                         thread = create_thread(db=db, thread_data=thread_data)
                         current_thread_id = thread.thread_id
                         current_version = 0
+                        
+                        # Initialize memory for new thread
+                        current_memory = manager.get_memory(client_id, str(current_thread_id))
+                    
+                    # Save SUMMARY to LangChain memory (not full diagram!)
+                    node_count = len(diagram_data.get("nodes", []))
+                    edge_count = len(diagram_data.get("edges", []))
+                    summary = f"Generated {diagram_type} diagram with {node_count} components and {edge_count} connections"
+                    
+                    if current_memory:
+                        current_memory.save_context(
+                            {"input": description},
+                            {"output": summary}
+                        )
                     
                     conversation_data = models.ConversationCreate(
                         thread_id=current_thread_id,
@@ -447,7 +579,7 @@ async def websocket_architecture_endpoint(
                         conversation_data=conversation_data
                     )
                     
-                    # Update memory
+                    # Update conversation_memory with FULL diagram
                     conversation_memory.append({
                         "version": conversation.version,
                         "diagram_json": diagram_data,
@@ -534,6 +666,20 @@ async def websocket_architecture_endpoint(
                         thread = create_thread(db=db, thread_data=thread_data)
                         current_thread_id = thread.thread_id
                         current_version = 0
+                        
+                        # Initialize memory for new thread
+                        current_memory = manager.get_memory(client_id, str(current_thread_id))
+                    
+                    # Save SUMMARY to LangChain memory (not full diagram!)
+                    node_count = len(diagram_data.get("nodes", []))
+                    edge_count = len(diagram_data.get("edges", []))
+                    summary = f"Generated {diagram_type} with {node_count} components after clarifications"
+                    
+                    if current_memory:
+                        current_memory.save_context(
+                            {"input": f"{current_analysis['original_description']} (with clarifications)"},
+                            {"output": summary}
+                        )
                     
                     conversation_data = models.ConversationCreate(
                         thread_id=current_thread_id,
@@ -546,6 +692,7 @@ async def websocket_architecture_endpoint(
                         conversation_data=conversation_data
                     )
                     
+                    # Update conversation_memory with FULL diagram
                     conversation_memory.append({
                         "version": conversation.version,
                         "diagram_json": diagram_data,
