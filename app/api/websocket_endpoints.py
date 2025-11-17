@@ -352,7 +352,7 @@ async def modify_diagram_rest(
 ):
     """
     Save diagram JSON as a new version to database.
-    This PATCH endpoint creates a new version with the provided diagram.
+    This PATCH endpoint updates the latest conversation with the provided diagram.
     
     Steps:
     1. Verify thread ownership
@@ -409,14 +409,19 @@ async def modify_diagram_rest(
             "timestamp": datetime.utcnow().isoformat(),
         })
         
-        # ✅ Step 3: Update latest conversation diagram
-        updated_conversation = update_conversation(
-            db=db,
-            conversation_id=latest_conversation.conversation_id,
-            diagram_json=diagram_json
-        )
-        
-        logger.info(f"✅ Updated conversation {updated_conversation.conversation_id} with new diagram")
+        # ✅ Step 3: Update latest conversation diagram directly
+        try:
+            latest_conversation.diagram_json = diagram_json
+            db.commit()
+            db.refresh(latest_conversation)
+            logger.info(f"✅ Updated conversation {latest_conversation.conversation_id} with new diagram")
+        except Exception as db_error:
+            db.rollback()
+            logger.error(f"❌ Database update failed: {str(db_error)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to update database: {str(db_error)}"
+            )
         
         # ✅ Step 4: Update ConversationBufferMemory for active WebSocket connections
         node_count = len(diagram_json.get("nodes", []))
@@ -428,14 +433,53 @@ async def modify_diagram_rest(
             f"Type: {diagram_type}"
         )
         
+        # Log memory state
+        logger.info(f"📊 Memory state before update:")
+        logger.info(f"   - Active connections: {len(manager.active_connections)}")
+        logger.info(f"   - Memory keys: {list(manager.memories.keys())}")
+        
+        # Update memory for all active connections with this thread
+        memory_updated = False
+        thread_id_str = str(thread_id)
+        
         for memory_key in list(manager.memories.keys()):
-            if str(thread_id) in memory_key:
+            # Memory key format is: {client_id}_{thread_id}
+            if thread_id_str in memory_key:
                 memory = manager.memories[memory_key]
-                memory.save_context(
-                    {"input": "Diagram updated"},
-                    {"output": summary}
-                )
+                
+                # FIXED: Use the correct LangChain memory API
+                memory.chat_memory.add_user_message("Manual diagram update via REST API")
+                memory.chat_memory.add_ai_message(summary)
+                
                 logger.info(f"   ✅ Updated memory: {memory_key}")
+                
+                # Verify memory update
+                messages = memory.chat_memory.messages
+                logger.info(f"   📝 Memory now has {len(messages)} total messages")
+                
+                memory_updated = True
+                
+                # Also send WebSocket notification if client is still connected
+                client_id = memory_key.split('_')[0]
+                if client_id in manager.active_connections:
+                    try:
+                        await manager.send_message(client_id, {
+                            "type": "diagram_updated_externally",
+                            "version": current_version,
+                            "message": "Diagram was updated",
+                            "metadata": {
+                                "node_count": node_count,
+                                "edge_count": edge_count,
+                                "diagram_type": diagram_type
+                            }
+                        })
+                        logger.info(f"   ✅ Sent WebSocket notification to {client_id}")
+                    except Exception as ws_error:
+                        logger.warning(f"   ⚠️ Failed to send WebSocket notification: {ws_error}")
+        
+        if not memory_updated:
+            logger.warning(f"   ⚠️ No active memory found for thread {thread_id}")
+            logger.warning(f"   This is normal if no WebSocket connection is active")
         
         logger.info(f"✅ Successfully updated diagram version {current_version}")
         
@@ -444,23 +488,23 @@ async def modify_diagram_rest(
             message=f"Diagram updated successfully in version {current_version}",
             version=current_version,
             metadata={
-                "node_count": len(diagram_json.get("nodes", [])),
-                "edge_count": len(diagram_json.get("edges", [])),
-                "diagram_type": diagram_json.get("metadata", {}).get("diagram_type", "architecture"),
+                "node_count": node_count,
+                "edge_count": edge_count,
+                "diagram_type": diagram_type,
             }
         )
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Error creating diagram version: {str(e)}", exc_info=True)
+        logger.error(f"❌ Error updating diagram: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to create diagram version: {str(e)}"
+            detail=f"Failed to update diagram: {str(e)}"
         )
 
 
-# ============= EXISTING WEBSOCKET ENDPOINT (COMPLETELY UNCHANGED) =============
+# ============= WEBSOCKET ENDPOINT WITH NEW DRAG MESSAGE TYPE =============
 @router.websocket("/ws/architecture/{client_id}")
 async def websocket_architecture_endpoint(
     websocket: WebSocket,
@@ -592,7 +636,106 @@ async def websocket_architecture_endpoint(
                     "message": f"🔄 Loaded thread with {len(conversation_memory)} previous versions"
                 })
             
-            # Handle modification requests
+            # ============= NEW: DRAG MESSAGE TYPE =============
+            elif message_type == "drag":
+                """
+                Handle diagram updates from drag/drop operations.
+                Updates the current version in-place (like REST API) without creating new version.
+                """
+                if not current_user or not current_thread_id:
+                    await manager.send_message(client_id, {
+                        "type": "error",
+                        "message": "Please create or load a thread first"
+                    })
+                    continue
+                
+                if not conversation_memory:
+                    await manager.send_message(client_id, {
+                        "type": "error",
+                        "message": "No diagram exists yet. Use 'analyze' to create the first version."
+                    })
+                    continue
+                
+                diagram_json = data.get("diagram", {})
+                
+                logger.info(f"🖱️ Processing drag update for thread {current_thread_id}")
+                logger.info(f"   - Nodes: {len(diagram_json.get('nodes', []))}")
+                logger.info(f"   - Edges: {len(diagram_json.get('edges', []))}")
+                
+                try:
+                    # Get latest conversation
+                    latest_conversation = get_latest_conversation(db=db, thread_id=current_thread_id)
+                    if not latest_conversation:
+                        await manager.send_message(client_id, {
+                            "type": "error",
+                            "message": "No conversation found in this thread"
+                        })
+                        continue
+                    
+                    current_version_num = latest_conversation.version
+                    
+                    # Ensure metadata exists
+                    if "metadata" not in diagram_json:
+                        diagram_json["metadata"] = {}
+                    
+                    # Update metadata with counts and timestamp
+                    diagram_json["metadata"].update({
+                        "node_count": len(diagram_json.get("nodes", [])),
+                        "edge_count": len(diagram_json.get("edges", [])),
+                        "timestamp": datetime.utcnow().isoformat(),
+                    })
+                    
+                    # Update conversation in database (in-place, no new version)
+                    latest_conversation.diagram_json = diagram_json
+                    db.commit()
+                    db.refresh(latest_conversation)
+                    
+                    logger.info(f"✅ Updated conversation {latest_conversation.conversation_id} via drag")
+                    
+                    # Update the conversation_memory list with the new diagram
+                    if conversation_memory:
+                        conversation_memory[-1]["diagram_json"] = diagram_json
+                        conversation_memory[-1]["created_at"] = datetime.utcnow().isoformat()
+                    
+                    # Update ConversationBufferMemory
+                    node_count = len(diagram_json.get("nodes", []))
+                    edge_count = len(diagram_json.get("edges", []))
+                    diagram_type = diagram_json.get("metadata", {}).get("diagram_type", "unknown")
+                    
+                    summary = (
+                        f"Version {current_version_num} updated via drag: {node_count} nodes, "
+                        f"{edge_count} edges. Type: {diagram_type}"
+                    )
+                    
+                    if current_memory:
+                        current_memory.chat_memory.add_user_message("Diagram updated via drag operation")
+                        current_memory.chat_memory.add_ai_message(summary)
+                        
+                        messages = current_memory.chat_memory.messages
+                        logger.info(f"   📝 Memory now has {len(messages)} total messages")
+                    
+                    # Send success response
+                    await manager.send_message(client_id, {
+                        "type": "diagram_drag_updated",
+                        "version": current_version_num,
+                        "diagram": diagram_json,
+                        "message": f"✅ Diagram updated via drag in version {current_version_num}",
+                        "metadata": {
+                            "node_count": node_count,
+                            "edge_count": edge_count,
+                            "diagram_type": diagram_type
+                        }
+                    })
+                    
+                except Exception as e:
+                    logger.error(f"❌ Drag update error: {str(e)}", exc_info=True)
+                    db.rollback()
+                    await manager.send_message(client_id, {
+                        "type": "error",
+                        "message": f"Failed to update diagram: {str(e)}"
+                    })
+            
+            # Handle modification requests (UNCHANGED - creates new version with AI)
             elif message_type == "modify":
                 if not current_user or not current_thread_id or not current_memory:
                     await manager.send_message(client_id, {
@@ -688,7 +831,7 @@ async def websocket_architecture_endpoint(
                         {"output": summary}
                     )
                     
-                    # Save modified version to database
+                    # Save modified version to database (NEW VERSION)
                     conversation_data = models.ConversationCreate(
                         thread_id=current_thread_id,
                         version=current_version,
