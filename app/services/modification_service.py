@@ -45,9 +45,12 @@ MODIFICATION RULES:
 5. If a component already exists, UPDATE it instead of creating duplicate
 
 POSITION PRESERVATION RULES (CRITICAL):
-- For EXISTING nodes that are NOT being removed, PRESERVE their exact position from the current diagram
-- Only assign new positions to newly added nodes
-- When a node exists in both old and new versions, copy its position exactly: {{"x": same_x, "y": same_y}}
+- **NEVER CHANGE NODE OR EDGE POSITIONS** - This is absolutely critical
+- For EXISTING nodes that are NOT being removed, copy their exact position from the current diagram: {{"x": same_x, "y": same_y}}
+- For EXISTING edges, preserve them exactly as they are
+- Only assign new positions to newly added nodes (use default positions like {{"x": 100, "y": 100}})
+- When a node exists in both old and new versions, copy its position exactly without modification
+- DO NOT move, reposition, or recalculate positions for any existing nodes or edges
 - This ensures the diagram layout remains stable across modifications
 
 CONTEXT INSTRUCTIONS:
@@ -81,9 +84,12 @@ MODIFICATION RULES:
 7. If a table already exists, UPDATE it instead of creating duplicate
 
 POSITION PRESERVATION RULES (CRITICAL):
-- For EXISTING tables that are NOT being removed, PRESERVE their exact position from the current schema
-- Only assign new positions to newly added tables
-- When a table exists in both old and new versions, copy its position exactly: {{"x": same_x, "y": same_y}}
+- **NEVER CHANGE TABLE OR EDGE POSITIONS** - This is absolutely critical
+- For EXISTING tables that are NOT being removed, copy their exact position from the current schema: {{"x": same_x, "y": same_y}}
+- For EXISTING edges, preserve them exactly as they are
+- Only assign new positions to newly added tables (use default positions like {{"x": 100, "y": 100}})
+- When a table exists in both old and new versions, copy its position exactly without modification
+- DO NOT move, reposition, or recalculate positions for any existing tables or edges
 - This ensures the schema diagram layout remains stable across modifications
 
 CONTEXT INSTRUCTIONS:

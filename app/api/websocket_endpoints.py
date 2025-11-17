@@ -71,6 +71,39 @@ class DiagramModificationRequest(BaseModel):
         }
 
 
+class DiagramUpdateRequest(BaseModel):
+    """
+    PATCH request to update the current version's diagram in a thread.
+    Updates the latest conversation without creating a new version.
+    """
+    thread_id: str = Field(..., description="Thread ID")
+    diagram: Dict[str, Any] = Field(..., description="Updated diagram JSON")
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "thread_id": "550e8400-e29b-41d4-a716-446655440000",
+                "diagram": {
+                    "nodes": [
+                        {
+                            "id": "node_1",
+                            "type": "custom",
+                            "position": {"x": 150, "y": 150},
+                            "data": {"label": "Updated API Gateway"}
+                        }
+                    ],
+                    "edges": [
+                        {
+                            "id": "edge_1",
+                            "source": "node_1",
+                            "target": "node_2"
+                        }
+                    ]
+                }
+            }
+        }
+
+
 class DiagramModificationResponse(BaseModel):
     success: bool
     message: str
@@ -311,24 +344,25 @@ async def get_current_user(authorization: str = Header(None)):
         )
 
 
-@router.post("/api/modify-diagram", response_model=DiagramModificationResponse)
+@router.patch("/api/modify-diagram", response_model=DiagramModificationResponse)
 async def modify_diagram_rest(
     request: DiagramModificationRequest,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user)
 ):
     """
-    Save diagram JSON to database without AI modification.
+    Save diagram JSON as a new version to database.
+    This PATCH endpoint creates a new version with the provided diagram.
     
     Steps:
     1. Verify thread ownership
-    2. Get current version number
-    3. Save diagram to conversation table
+    2. Get latest conversation in thread
+    3. Update diagram JSON in place
     4. Update ConversationBufferMemory
     
     Security:
     - User ID extracted from JWT token only
-    - Thread ownership verified before save
+    - Thread ownership verified before update
     """
     try:
         thread_id = UUID(request.thread_id)
@@ -351,12 +385,16 @@ async def modify_diagram_rest(
         
         logger.info(f"✅ User {user_id} authorized for thread {thread_id}")
         
-        # ✅ Step 2: Get current version number
-        conversations = get_conversations(db=db, thread_id=thread_id, skip=0, limit=1000)
-        current_version = len(conversations)
-        new_version = current_version  # New version to save
+        # ✅ Step 2: Get latest conversation
+        latest_conversation = get_latest_conversation(db=db, thread_id=thread_id)
+        if not latest_conversation:
+            raise HTTPException(
+                status_code=404,
+                detail="No conversation found in this thread"
+            )
         
-        logger.info(f"💾 Saving diagram to thread {thread_id}, version {new_version}")
+        current_version = latest_conversation.version
+        logger.info(f"📝 Updating latest diagram in thread {thread_id}, version {current_version}")
         logger.info(f"   - Nodes: {len(diagram_json.get('nodes', []))}")
         logger.info(f"   - Edges: {len(diagram_json.get('edges', []))}")
         
@@ -371,51 +409,40 @@ async def modify_diagram_rest(
             "timestamp": datetime.utcnow().isoformat(),
         })
         
-        # ✅ Step 3: Save to database
-        conversation_data = models.ConversationCreate(
-            thread_id=thread_id,
-            version=new_version,
+        # ✅ Step 3: Update latest conversation diagram
+        updated_conversation = update_conversation(
+            db=db,
+            conversation_id=latest_conversation.conversation_id,
             diagram_json=diagram_json
         )
         
-        new_conversation = update_conversation(
-            db=db,
-            thread_id=thread_id,
-            version = 1,
-            diagram_json=conversation_data
-        )
-        
-        logger.info(f"✅ Saved conversation {new_conversation.conversation_id}")
+        logger.info(f"✅ Updated conversation {updated_conversation.conversation_id} with new diagram")
         
         # ✅ Step 4: Update ConversationBufferMemory for active WebSocket connections
-        # This keeps the AI context in sync
+        node_count = len(diagram_json.get("nodes", []))
+        edge_count = len(diagram_json.get("edges", []))
+        diagram_type = diagram_json.get("metadata", {}).get("diagram_type", "unknown")
+        
+        summary = (
+            f"Version {current_version} updated: {node_count} nodes, {edge_count} edges. "
+            f"Type: {diagram_type}"
+        )
+        
         for memory_key in list(manager.memories.keys()):
-            if str(thread_id) in memory_key and str(user_id) in memory_key:
+            if str(thread_id) in memory_key:
                 memory = manager.memories[memory_key]
-                
-                # Save a summary to the memory
-                node_count = len(diagram_json.get("nodes", []))
-                edge_count = len(diagram_json.get("edges", []))
-                diagram_type = diagram_json.get("metadata", {}).get("diagram_type", "unknown")
-                
-                summary = (
-                    f"Diagram saved: {node_count} nodes, {edge_count} edges. "
-                    f"Type: {diagram_type}"
-                )
-                
                 memory.save_context(
-                    {"input": "Auto-save diagram changes"},
+                    {"input": "Diagram updated"},
                     {"output": summary}
                 )
-                
                 logger.info(f"   ✅ Updated memory: {memory_key}")
         
-        logger.info(f"✅ Successfully saved diagram to version {new_version}")
+        logger.info(f"✅ Successfully updated diagram version {current_version}")
         
         return DiagramModificationResponse(
             success=True,
-            message=f"Diagram saved successfully as version {new_version}",
-            version=new_version,
+            message=f"Diagram updated successfully in version {current_version}",
+            version=current_version,
             metadata={
                 "node_count": len(diagram_json.get("nodes", [])),
                 "edge_count": len(diagram_json.get("edges", [])),
@@ -426,11 +453,13 @@ async def modify_diagram_rest(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Error saving diagram: {str(e)}", exc_info=True)
+        logger.error(f"❌ Error creating diagram version: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to save diagram: {str(e)}"
+            detail=f"Failed to create diagram version: {str(e)}"
         )
+
+
 # ============= EXISTING WEBSOCKET ENDPOINT (COMPLETELY UNCHANGED) =============
 @router.websocket("/ws/architecture/{client_id}")
 async def websocket_architecture_endpoint(

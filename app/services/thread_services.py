@@ -1,7 +1,7 @@
 # app/services/thread_services.py
 from sqlalchemy.orm import Session
 from uuid import UUID
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from app.core import models as pydantic_models
 from app.db import models as db_models
@@ -171,9 +171,9 @@ def update_conversation(
     db: Session, 
     conversation_id: UUID, 
     version: Optional[int] = None, 
-    diagram_json: Optional[str] = None
+    diagram_json: Optional[Dict] = None
 ) -> Optional[db_models.Conversation]:
-    """Update conversation version or diagram JSON"""
+    """Update conversation version or diagram JSON by conversation_id"""
     conversation = get_conversation(db, conversation_id)
     
     if conversation:
@@ -191,3 +191,5 @@ def update_conversation(
             db.refresh(conversation)
             
     return conversation
+
+
