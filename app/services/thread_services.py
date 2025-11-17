@@ -166,3 +166,28 @@ def delete_conversation(db: Session, conversation_id: UUID) -> bool:
         db.commit()
         return True
     return False
+
+def update_conversation(
+    db: Session, 
+    conversation_id: UUID, 
+    version: Optional[int] = None, 
+    diagram_json: Optional[str] = None
+) -> Optional[db_models.Conversation]:
+    """Update conversation version or diagram JSON"""
+    conversation = get_conversation(db, conversation_id)
+    
+    if conversation:
+        # Check and update version
+        if version is not None:
+            conversation.version = version
+            
+        # Check and update diagram_json
+        if diagram_json is not None:
+            conversation.diagram_json = diagram_json
+            
+        # Only commit if changes were made (though SQLAlchemy often tracks this)
+        if version is not None or diagram_json is not None:
+            db.commit()
+            db.refresh(conversation)
+            
+    return conversation

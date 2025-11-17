@@ -1,19 +1,21 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, Header
+from pydantic import BaseModel, Field
 from typing import Dict, List, Any, Optional
+from sqlalchemy.orm import Session
 import json
 from datetime import datetime
 from uuid import UUID
 import logging
-
+import jwt
 from langchain.memory import ConversationBufferMemory
 from langchain.schema import HumanMessage, AIMessage
-
-from app.database import get_db, SessionLocal
+import os
+from app.database import get_db
 from app.services import analyzer, diagram_generator
 from app.services.modification_service import DiagramModifier
 from app.services.thread_services import (
     create_thread, get_thread, create_conversation, 
-    get_conversations
+    get_conversations, get_latest_conversation, update_conversation
 )
 from app.api.dependencies import get_current_user_from_websocket
 from app.core import models
@@ -30,6 +32,51 @@ analyzer_service = analyzer.ArchitectureAnalyzer()
 diagram_gen_service = diagram_generator.DiagramGenerator()
 modifier_service = DiagramModifier()
 
+# ============= NEW: REST API REQUEST/RESPONSE MODELS =============
+class DiagramModificationRequest(BaseModel):
+    """
+    Simplified request - just save the diagram JSON.
+    No AI modification, just storage.
+    """
+    thread_id: str = Field(..., description="Thread ID")
+    diagram: Dict[str, Any] = Field(..., description="Complete diagram JSON to save")
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "thread_id": "550e8400-e29b-41d4-a716-446655440000",
+                "diagram": {
+                    "nodes": [
+                        {
+                            "id": "node_1",
+                            "type": "custom",
+                            "position": {"x": 100, "y": 100},
+                            "data": {"label": "API Gateway"}
+                        }
+                    ],
+                    "edges": [
+                        {
+                            "id": "edge_1",
+                            "source": "node_1",
+                            "target": "node_2"
+                        }
+                    ],
+                    "metadata": {
+                        "diagram_type": "architecture",
+                        "node_count": 5,
+                        "edge_count": 4
+                    }
+                }
+            }
+        }
+
+
+class DiagramModificationResponse(BaseModel):
+    success: bool
+    message: str
+    version: int
+    metadata: Optional[Dict[str, Any]] = None
+# ============= EXISTING ConnectionManager CLASS (UNCHANGED) =============
 class ConnectionManager:
     """Manages WebSocket connections with LangChain memory per session"""
     
@@ -80,8 +127,9 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+# ============= EXISTING HELPER FUNCTIONS (UNCHANGED) =============
 async def load_conversation_memory_to_langchain(
-    db: SessionLocal, 
+    db: Session, 
     thread_id: UUID, 
     memory: ConversationBufferMemory,
     limit: int = 10
@@ -172,7 +220,9 @@ async def build_context_from_memory(memory_data: List[Dict]) -> Dict:
             for conv in memory_data
         ]
     }
-
+    
+SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+ALGORITHM = "HS256"
 def get_latest_diagram(conversation_memory: List[Dict]) -> Dict:
     """Get the most recent diagram from memory"""
     if not conversation_memory:
@@ -203,11 +253,190 @@ def prepare_conversation_history_for_modifier(memory_data: List[Dict]) -> List[D
     
     return history
 
+async def get_current_user(authorization: str = Header(None)):
+    """
+    Extract and validate user from Authorization header.
+    Expected format: "Bearer <token>"
+    Returns the user_id from the token payload.
+    """
+    if not authorization:
+        raise HTTPException(
+            status_code=401,
+            detail="Authorization header missing"
+        )
+    
+    try:
+        # Extract token from "Bearer <token>"
+        scheme, token = authorization.split()
+        if scheme.lower() != "bearer":
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid authentication scheme"
+            )
+        
+        # Decode JWT token
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,  # Your secret key
+            algorithms=[ALGORITHM]  # Your algorithm (e.g., "HS256")
+        )
+        
+        # Extract user_id from token payload
+        # Adjust these field names based on your JWT structure
+        user_id = payload.get("sub") or payload.get("user_id") or payload.get("id")
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid token payload: user_id not found"
+            )
+        
+        logger.info(f"🔐 Authenticated user: {user_id}")
+        return user_id
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=401,
+            detail="Token has expired"
+        )
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid token"
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authorization header format"
+        )
+
+
+@router.post("/api/modify-diagram", response_model=DiagramModificationResponse)
+async def modify_diagram_rest(
+    request: DiagramModificationRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Save diagram JSON to database without AI modification.
+    
+    Steps:
+    1. Verify thread ownership
+    2. Get current version number
+    3. Save diagram to conversation table
+    4. Update ConversationBufferMemory
+    
+    Security:
+    - User ID extracted from JWT token only
+    - Thread ownership verified before save
+    """
+    try:
+        thread_id = UUID(request.thread_id)
+        diagram_json = request.diagram
+        
+        # ✅ Step 1: Verify thread exists and belongs to user
+        thread = get_thread(db=db, thread_id=thread_id)
+        if not thread:
+            raise HTTPException(status_code=404, detail="Thread not found")
+        
+        if str(thread.user_id) != str(user_id):
+            logger.warning(
+                f"⚠️ User {user_id} attempted to access thread {thread_id} "
+                f"owned by {thread.user_id}"
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="You don't have permission to modify this thread"
+            )
+        
+        logger.info(f"✅ User {user_id} authorized for thread {thread_id}")
+        
+        # ✅ Step 2: Get current version number
+        conversations = get_conversations(db=db, thread_id=thread_id, skip=0, limit=1000)
+        current_version = len(conversations)
+        new_version = current_version  # New version to save
+        
+        logger.info(f"💾 Saving diagram to thread {thread_id}, version {new_version}")
+        logger.info(f"   - Nodes: {len(diagram_json.get('nodes', []))}")
+        logger.info(f"   - Edges: {len(diagram_json.get('edges', []))}")
+        
+        # Ensure metadata exists
+        if "metadata" not in diagram_json:
+            diagram_json["metadata"] = {}
+        
+        # Update metadata with counts and timestamp
+        diagram_json["metadata"].update({
+            "node_count": len(diagram_json.get("nodes", [])),
+            "edge_count": len(diagram_json.get("edges", [])),
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+        
+        # ✅ Step 3: Save to database
+        conversation_data = models.ConversationCreate(
+            thread_id=thread_id,
+            version=new_version,
+            diagram_json=diagram_json
+        )
+        
+        new_conversation = update_conversation(
+            db=db,
+            thread_id=thread_id,
+            version = 1,
+            diagram_json=conversation_data
+        )
+        
+        logger.info(f"✅ Saved conversation {new_conversation.conversation_id}")
+        
+        # ✅ Step 4: Update ConversationBufferMemory for active WebSocket connections
+        # This keeps the AI context in sync
+        for memory_key in list(manager.memories.keys()):
+            if str(thread_id) in memory_key and str(user_id) in memory_key:
+                memory = manager.memories[memory_key]
+                
+                # Save a summary to the memory
+                node_count = len(diagram_json.get("nodes", []))
+                edge_count = len(diagram_json.get("edges", []))
+                diagram_type = diagram_json.get("metadata", {}).get("diagram_type", "unknown")
+                
+                summary = (
+                    f"Diagram saved: {node_count} nodes, {edge_count} edges. "
+                    f"Type: {diagram_type}"
+                )
+                
+                memory.save_context(
+                    {"input": "Auto-save diagram changes"},
+                    {"output": summary}
+                )
+                
+                logger.info(f"   ✅ Updated memory: {memory_key}")
+        
+        logger.info(f"✅ Successfully saved diagram to version {new_version}")
+        
+        return DiagramModificationResponse(
+            success=True,
+            message=f"Diagram saved successfully as version {new_version}",
+            version=new_version,
+            metadata={
+                "node_count": len(diagram_json.get("nodes", [])),
+                "edge_count": len(diagram_json.get("edges", [])),
+                "diagram_type": diagram_json.get("metadata", {}).get("diagram_type", "architecture"),
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error saving diagram: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to save diagram: {str(e)}"
+        )
+# ============= EXISTING WEBSOCKET ENDPOINT (COMPLETELY UNCHANGED) =============
 @router.websocket("/ws/architecture/{client_id}")
 async def websocket_architecture_endpoint(
     websocket: WebSocket,
     client_id: str,
-    db: SessionLocal = Depends(get_db)
+    db: Session = Depends(get_db)
 ):
     """WebSocket endpoint for real-time architecture diagram generation with LangChain memory"""
     
