@@ -109,3 +109,73 @@ class ConversationResponse(ConversationBase):
 
     class Config:
         from_attributes = True
+
+# REST API Models for diagram modification
+class DiagramModificationRequest(BaseModel):
+    """Request to update diagram via REST API"""
+    thread_id: str
+    diagram: Dict[str, Any]
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "thread_id": "550e8400-e29b-41d4-a716-446655440000",
+                "diagram": {
+                    "nodes": [
+                        {
+                            "id": "node_1",
+                            "type": "custom",
+                            "position": {"x": 100, "y": 100},
+                            "data": {"label": "API Gateway"}
+                        }
+                    ],
+                    "edges": [
+                        {
+                            "id": "edge_1",
+                            "source": "node_1",
+                            "target": "node_2"
+                        }
+                    ],
+                    "metadata": {
+                        "diagram_type": "architecture",
+                        "node_count": 5,
+                        "edge_count": 4
+                    }
+                }
+            }
+        }
+
+class DiagramUpdateRequest(BaseModel):
+    """PATCH request to update current version's diagram"""
+    thread_id: str
+    diagram: Dict[str, Any]
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "thread_id": "550e8400-e29b-41d4-a716-446655440000",
+                "diagram": {
+                    "nodes": [
+                        {
+                            "id": "node_1",
+                            "type": "custom",
+                            "position": {"x": 150, "y": 150},
+                            "data": {"label": "Updated API Gateway"}
+                        }
+                    ],
+                    "edges": [
+                        {
+                            "id": "edge_1",
+                            "source": "node_1",
+                            "target": "node_2"
+                        }
+                    ]
+                }
+            }
+        }
+
+class DiagramModificationResponse(BaseModel):
+    success: bool
+    message: str
+    version: int
+    metadata: Optional[Dict[str, Any]] = None

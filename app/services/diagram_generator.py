@@ -350,7 +350,9 @@ class DiagramGenerator:
         - nodes: array of objects, each representing a database table.
         - edges: array of objects, representing relationships between tables.
         - metadata: object containing domain, timestamp, edge_count, node_count, and diagram_type.
-
+        Important:
+        - All table names must follow this naming convention: t_<table_name>
+        Example: t_users, t_orders, t_project_tasks
         Each node (table) object must have the following structure:
         {{
             "id": "unique_table_id_lowercase_snake_case",
