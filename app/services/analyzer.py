@@ -13,7 +13,7 @@ google_api_key = os.getenv("GOOGLE_API_KEY")
 if not google_api_key:
     raise ValueError("GOOGLE_API_KEY environment variable not set")
 os.environ["GOOGLE_API_KEY"] = google_api_key
-llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.7, max_tokens=4000)
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.7, max_tokens=4000)
 
 class ArchitectureAnalyzer:
     """Core analyzer for extracting context from project descriptions"""

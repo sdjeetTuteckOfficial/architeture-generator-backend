@@ -11,7 +11,7 @@ from constants.constants import AWS_AVAILABLE_IMAGES, AZURE_AVAILABLE_IMAGES, lo
 
 load_dotenv()
 os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY")
-llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.7, max_tokens=4000)
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.7, max_tokens=4000)
 
 AVAILABLE_ICONS = AWS_AVAILABLE_IMAGES + AZURE_AVAILABLE_IMAGES + local_images
 
@@ -331,7 +331,7 @@ class DiagramGenerator:
     def generate_database_diagram(self, description: str, context: Dict[str, Any], 
                                 user_responses: Dict[str, str]) -> Dict[str, Any]:
         """Generate database schema diagram with React Flow compatible format"""
-        
+        print("i am hereeeee🦝")
         user_prompt = f"""
         Project Description: {description}
         
@@ -384,6 +384,7 @@ class DiagramGenerator:
         Ensure that foreign key relationships are correctly represented by both:
         1. Setting "foreignKey": true and "references": "table_id.column_name" in the field definition of the child table.
         2. Creating an edge from the parent table's ID to the child table's ID (source -> target).
+        3. Min 10 node should be created if the requirement is valid then normalize.
 
         Generate a comprehensive database schema with 20-50 related tables based on the project requirements.
         Position nodes in a logical layout with appropriate spacing (e.g., x: 0, 300, 600, 900 and y: 0, 150, 300, 450).
