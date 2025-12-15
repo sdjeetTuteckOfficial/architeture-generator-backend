@@ -8,7 +8,7 @@ import os
 
 load_dotenv()
 os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY")
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.7, max_tokens=4000)
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.7, max_tokens=4000)
 
 class TextArchitectureGenerator:
     """Generate detailed text-based architecture documents"""

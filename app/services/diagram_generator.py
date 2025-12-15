@@ -11,7 +11,7 @@ from constants.constants import AWS_AVAILABLE_IMAGES, AZURE_AVAILABLE_IMAGES, lo
 
 load_dotenv()
 os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY")
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.7, max_tokens=4000)
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.7, max_tokens=4000)
 
 AVAILABLE_ICONS = AWS_AVAILABLE_IMAGES + AZURE_AVAILABLE_IMAGES + local_images
 
