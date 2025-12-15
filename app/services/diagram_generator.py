@@ -1,5 +1,6 @@
 import json
 import re
+import traceback  # Added for detailed error logs
 from typing import Dict, Any
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
@@ -17,8 +18,9 @@ except ImportError:
 from constants.constants import AWS_AVAILABLE_IMAGES, AZURE_AVAILABLE_IMAGES, local_images
 
 load_dotenv()
+os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY")
 
-# Keep temperature low for structural integrity
+# Use standard flash model (not lite) to avoid daily quota limits
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash", 
     temperature=0.2, 
@@ -33,10 +35,9 @@ class DiagramGenerator:
     def _clean_and_parse_json(self, content: str) -> Dict[str, Any]:
         """
         Nuclear option for JSON parsing.
-        1. Tries standard json.loads
-        2. Tries json_repair (if installed)
-        3. Tries manual regex fixes for common LLM errors (missing commas, trailing commas)
         """
+        original_content = content  # Keep for debugging
+
         # 1. Strip Markdown code blocks
         if "```json" in content:
             content = content.split("```json")[1].split("```")[0]
@@ -50,7 +51,7 @@ class DiagramGenerator:
             try:
                 return json_repair.loads(content)
             except Exception as e:
-                print(f"json_repair failed: {e}")
+                print(f"⚠️ [DEBUG] json_repair failed: {e}")
 
         # 3. Manual Fixes (Fallback)
         try:
@@ -62,11 +63,14 @@ class DiagramGenerator:
             
             return json.loads(content)
         except Exception as e:
-            print(f"Manual JSON Parsing Error: {e}")
+            print(f"❌ [DEBUG] Manual JSON Parsing Error: {e}")
+            print(f"❌ [DEBUG] Failed JSON Content (First 500 chars): {content[:500]}...")
+            
             # Last resort: Try to find the largest valid JSON object subset
             try:
                 match = re.search(r'\{.*\}', content, re.DOTALL)
                 if match:
+                    print("⚠️ [DEBUG] Regex found JSON subset, attempting parse...")
                     return json.loads(match.group())
             except:
                 pass
@@ -133,7 +137,6 @@ class DiagramGenerator:
             diagram = self._clean_and_parse_json(response.content)
             
             if diagram:
-                # Ensure metadata exists
                 if "metadata" not in diagram:
                     diagram["metadata"] = {}
                 
@@ -149,27 +152,33 @@ class DiagramGenerator:
                 raise ValueError("JSON parsing returned None")
 
         except Exception as e:
-            print(f"Architecture Gen Error: {e}")
+            print(f"❌ [DEBUG] Architecture Gen Error: {e}")
             return self._get_fallback_architecture()
 
     def generate_database_diagram(self, description: str, context: Dict[str, Any], 
                                 user_responses: Dict[str, str]) -> Dict[str, Any]:
-        """Generate database schema diagram"""
+        """Generate database schema diagram with React Flow compatible format"""
+        print("\n🔍 [DEBUG] Starting Database Diagram Generation...")
         
+        simplified_context = {
+            "domain": context.get("domain", "General"),
+            "core_requirement": description[:500]
+        }
+
         db_prompt = f"""
-        ROLE: You are a Database Architect. Generate a strict JSON schema for an ERD.
+        ROLE: Database Architect.
+        TASK: Generate a React Flow JSON for an Entity Relationship Diagram (ERD).
         
-        INPUT:
-        - Description: {description}
-        - Requirements: {json.dumps(user_responses)}
-
-        CONSTRAINTS:
-        1. Return Valid JSON only. No comments.
-        2. Generate 5-10 normalized tables.
-        3. Table IDs must start with 't_' (e.g., t_users).
-        4. Define Foreign Keys in both 'fields' and 'edges'.
-
-        OUTPUT STRUCTURE:
+        INPUT CONTEXT: {json.dumps(simplified_context)}
+        USER REQUIREMENTS: {json.dumps(user_responses)}
+        
+        STRICT RULES:
+        1. Output ONLY valid JSON. No Markdown code blocks (no ```json).
+        2. Create 5-10 normalized tables.
+        3. Table IDs MUST start with 't_' (e.g., t_users, t_orders).
+        4. Define Foreign Keys in the 'fields' list (as 'foreignKey': true) AND in the 'edges' list.
+        
+        REQUIRED JSON STRUCTURE:
         {{
             "nodes": [
                 {{
@@ -179,39 +188,65 @@ class DiagramGenerator:
                         "label": "Users",
                         "fields": [
                             {{ "name": "id", "type": "SERIAL", "primaryKey": true, "foreignKey": false }},
-                            {{ "name": "role_id", "type": "INT", "primaryKey": false, "foreignKey": true, "references": "t_roles.id" }}
+                            {{ "name": "email", "type": "VARCHAR(255)", "primaryKey": false, "foreignKey": false }}
                         ]
                     }},
                     "position": {{ "x": 0, "y": 0 }}
                 }}
             ],
             "edges": [
-                {{ "id": "e1", "source": "t_roles", "target": "t_users", "type": "default", "label": "FK" }}
+                {{ "id": "e1", "source": "t_users", "target": "t_orders", "type": "default", "label": "1:N" }}
             ],
             "metadata": {{ "diagram_type": "db_diagram" }}
         }}
         """
         
         try:
+            print("⏳ [DEBUG] Invoking LLM...")
             response = llm.invoke([HumanMessage(content=db_prompt)])
+            
+            # --- DEBUG LOGGING START ---
+            print("\n---------------- RAW LLM RESPONSE ----------------")
+            print(response.content)
+            print("--------------------------------------------------\n")
+            # --- DEBUG LOGGING END ---
+
             diagram = self._clean_and_parse_json(response.content)
             
-            if diagram:
-                if "metadata" not in diagram:
-                    diagram["metadata"] = {}
-                diagram["metadata"].update({
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "diagram_type": "db_diagram"
-                })
-                return diagram
-            else:
-                raise ValueError("JSON parsing returned None")
+            if not diagram:
+                print("❌ [DEBUG] JSON Parser returned None. The LLM output might be empty or severely malformed.")
+                raise ValueError("JSON parser returned None")
+                
+            if "nodes" not in diagram:
+                if isinstance(diagram, list):
+                    print("⚠️ [DEBUG] LLM returned a List instead of a Dict. Auto-correcting...")
+                    diagram = {"nodes": diagram, "edges": [], "metadata": {}}
+                else:
+                    print(f"❌ [DEBUG] JSON is valid but missing 'nodes' key. Keys found: {diagram.keys()}")
+                    raise ValueError("Parsed JSON missing 'nodes' key")
+
+            if "metadata" not in diagram:
+                diagram["metadata"] = {}
+            
+            diagram["metadata"].update({
+                "domain": context.get("domain", "unknown"),
+                "timestamp": datetime.utcnow().isoformat(),
+                "node_count": len(diagram.get("nodes", [])),
+                "edge_count": len(diagram.get("edges", [])),
+                "diagram_type": "db_diagram"
+            })
+            
+            print(f"✅ [DEBUG] Database Diagram Successfully Generated ({len(diagram['nodes'])} nodes)")
+            return diagram
 
         except Exception as e:
-            print(f"Database Gen Error: {e}")
+            print(f"\n❌ [DEBUG] CRITICAL ERROR in Database Gen: {str(e)}")
+            print("👇 [DEBUG] Full Traceback:")
+            traceback.print_exc()
             return self._get_fallback_database()
 
     def _get_fallback_architecture(self):
+        print("⚠️ [DEBUG] Triggering Architecture Fallback")
         return {
             "nodes": [
                 {"id": "error_node", "type": "custom", "data": {"label": "Error Generating Diagram", "image": "alert.png", "description": "Please try again."}, "position": {"x": 250, "y": 250}}
@@ -221,6 +256,7 @@ class DiagramGenerator:
         }
 
     def _get_fallback_database(self):
+        print("⚠️ [DEBUG] Triggering Database Fallback")
         return {
             "nodes": [
                 {"id": "t_error", "type": "custom", "data": {"label": "Error", "fields": []}, "position": {"x": 100, "y": 100}}
