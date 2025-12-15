@@ -93,7 +93,7 @@ class DiagramGenerator:
         
         CONSTRAINTS:
         1. **STRICT JSON ONLY**: Do not output markdown, comments, or explanations.
-        2. **Node Limit**: Generate 10-20 essential nodes (Frontend, API, Services, DB).
+        2. **Node Limit**: Generate 10-50 essential nodes (Frontend, API, Services, DB).
         3. **Icons**: Use ONLY these filenames: {json.dumps(AVAILABLE_ICONS)}
         4. **Layout**:
            - Frontend: y=0
@@ -174,7 +174,7 @@ class DiagramGenerator:
         
         STRICT RULES:
         1. Output ONLY valid JSON. No Markdown code blocks (no ```json).
-        2. Create 5-10 normalized tables.
+        2. Create 5-50 normalized tables.
         3. Table IDs MUST start with 't_' (e.g., t_users, t_orders).
         4. Define Foreign Keys in the 'fields' list (as 'foreignKey': true) AND in the 'edges' list.
         
