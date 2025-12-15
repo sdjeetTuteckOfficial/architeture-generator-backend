@@ -108,7 +108,7 @@ class TextArchitectureResponse(BaseModel):
     timestamp: str
 
 # Initialize LLM
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.7, max_tokens=4000)
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.7, max_tokens=4000)
 
 class ArchitectureAnalyzer:
     """Core analyzer for extracting context from project descriptions"""
