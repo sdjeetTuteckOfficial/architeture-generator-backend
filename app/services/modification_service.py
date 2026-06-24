@@ -8,7 +8,7 @@ from datetime import datetime
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import ChatPromptTemplate
 from langchain.schema import SystemMessage, HumanMessage
-from langchain.memory import ConversationBufferMemory
+from app.core.simple_memory import ConversationBufferMemory
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ class DiagramModifier:
             raise ValueError("GOOGLE_API_KEY not found in environment")
         
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model="gemini-2.5-flash-lite",
             google_api_key=api_key,
             temperature=0.1,
             convert_system_message_to_human=True

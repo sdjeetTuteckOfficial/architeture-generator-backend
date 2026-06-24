@@ -1,6 +1,7 @@
 import json
 import re
 import traceback  # Added for detailed error logs
+import logging
 from typing import Dict, Any
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
@@ -13,7 +14,6 @@ try:
     import json_repair
 except ImportError:
     json_repair = None
-    print("Warning: 'json_repair' library not found. Install it with `pip install json_repair` for better stability.")
 
 from constants.constants import AWS_AVAILABLE_IMAGES, AZURE_AVAILABLE_IMAGES, local_images
 
@@ -22,12 +22,14 @@ os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY")
 
 # Use standard flash model (not lite) to avoid daily quota limits
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash", 
+    model="gemini-2.5-flash-lite", 
     temperature=0.2, 
     max_tokens=8000
 )
 
 AVAILABLE_ICONS = AWS_AVAILABLE_IMAGES + AZURE_AVAILABLE_IMAGES + local_images
+
+logger = logging.getLogger(__name__)
 
 class DiagramGenerator:
     """Generate ReactFlow diagrams for different architecture types"""
@@ -134,6 +136,7 @@ class DiagramGenerator:
         
         try:
             response = llm.invoke([HumanMessage(content=architecture_prompt)])
+            logger.info("LLM architecture diagram response: %s", response.content)
             diagram = self._clean_and_parse_json(response.content)
             
             if diagram:
@@ -204,13 +207,7 @@ class DiagramGenerator:
         try:
             print("⏳ [DEBUG] Invoking LLM...")
             response = llm.invoke([HumanMessage(content=db_prompt)])
-            
-            # --- DEBUG LOGGING START ---
-            print("\n---------------- RAW LLM RESPONSE ----------------")
-            print(response.content)
-            print("--------------------------------------------------\n")
-            # --- DEBUG LOGGING END ---
-
+            logger.info("LLM database diagram response: %s", response.content)
             diagram = self._clean_and_parse_json(response.content)
             
             if not diagram:
@@ -264,3 +261,8 @@ class DiagramGenerator:
             "edges": [],
             "metadata": {"diagram_type": "db_diagram", "error": "true"}
         }
+
+
+
+
+

@@ -7,7 +7,7 @@ from datetime import datetime
 from uuid import UUID
 import logging
 import jwt
-from langchain.memory import ConversationBufferMemory
+from app.core.simple_memory import ConversationBufferMemory
 from langchain.schema import HumanMessage, AIMessage
 import os
 from app.database import get_db
@@ -27,6 +27,11 @@ router = APIRouter()
 # Available icons for architecture diagrams
 AVAILABLE_ICONS = AWS_AVAILABLE_IMAGES + AZURE_AVAILABLE_IMAGES + local_images
 
+
+def ws_print(message: str):
+    """Print websocket debug traces directly to the terminal."""
+    print(f"[websocket_endpoints] {message}", flush=True)
+
 # Service instances
 analyzer_service = analyzer.ArchitectureAnalyzer()
 diagram_gen_service = diagram_generator.DiagramGenerator()
@@ -45,11 +50,13 @@ class ConnectionManager:
         await websocket.accept()
         self.active_connections[client_id] = websocket
         logger.info(f"Client {client_id} connected")
+        ws_print(f"client connected: {client_id}")
     
     def disconnect(self, client_id: str):
         if client_id in self.active_connections:
             del self.active_connections[client_id]
             logger.info(f"Client {client_id} disconnected")
+            ws_print(f"client disconnected: {client_id}")
         
         # Clean up memories for this client
         keys_to_remove = [k for k in self.memories.keys() if k.startswith(f"{client_id}_")]
@@ -58,6 +65,7 @@ class ConnectionManager:
     
     async def send_message(self, client_id: str, message: dict):
         if client_id in self.active_connections:
+            ws_print(f"outgoing to {client_id}: {message.get('type', 'unknown')} {message}")
             await self.active_connections[client_id].send_json(message)
     
     def get_memory(self, client_id: str, thread_id: str) -> ConversationBufferMemory:
@@ -71,6 +79,7 @@ class ConnectionManager:
                 output_key="output"
             )
             logger.info(f"Created new memory for {memory_key}")
+            ws_print(f"created memory: {memory_key}")
         
         return self.memories[memory_key]
     
@@ -80,6 +89,7 @@ class ConnectionManager:
         if memory_key in self.memories:
             self.memories[memory_key].clear()
             logger.info(f"Cleared memory for {memory_key}")
+            ws_print(f"cleared memory: {memory_key}")
 
 manager = ConnectionManager()
 
@@ -137,6 +147,7 @@ async def load_conversation_memory_to_langchain(
     
     logger.info(f"Loaded {len(conversations)} conversation summaries into LangChain memory")
     logger.info(f"Stored {len(memory_data)} full diagrams separately for modifications")
+    ws_print(f"loaded {len(conversations)} conversations into memory")
     return sorted(memory_data, key=lambda x: x["version"])
 
 async def build_context_from_memory(memory_data: List[Dict]) -> Dict:
@@ -247,7 +258,7 @@ async def get_current_user(authorization: str = Header(None)):
                 detail="Invalid token payload: user_id not found"
             )
         
-        logger.info(f"🔐 Authenticated user: {user_id}")
+        logger.info(f"ðŸ” Authenticated user: {user_id}")
         return user_id
         
     except jwt.ExpiredSignatureError:
@@ -277,6 +288,7 @@ async def websocket_architecture_endpoint(
     """WebSocket endpoint for real-time architecture diagram generation with LangChain memory"""
     
     await manager.connect(websocket, client_id)
+    ws_print(f"websocket handler started for client: {client_id}")
     
     # Session state
     current_user = None
@@ -291,13 +303,14 @@ async def websocket_architecture_endpoint(
     try:
         await manager.send_message(client_id, {
             "type": "connected",
-            "message": "✅ Connection established. Gunevo ArchitectX is now live, shaping ideas into intelligent architecture",
+            "message": "âœ… Connection established. Gunevo ArchitectX is now live, shaping ideas into intelligent architecture",
             "timestamp": datetime.now().isoformat()
         })
         
         while True:
             data = await websocket.receive_json()
             message_type = data.get("type")
+            ws_print(f"received message from {client_id}: type={message_type} payload={data}")
             
             # Handle authentication
             if message_type == "auth":
@@ -320,7 +333,7 @@ async def websocket_architecture_endpoint(
                 await manager.send_message(client_id, {
                     "type": "authenticated",
                     "user_id": str(current_user.id),
-                    "message": f"🔐 Authenticated as {current_user.email}"
+                    "message": f"ðŸ” Authenticated as {current_user.email}"
                 })
             
             # Handle thread creation
@@ -351,7 +364,7 @@ async def websocket_architecture_endpoint(
                     "type": "thread_created",
                     "thread_id": str(current_thread_id),
                     "thread_name": thread_name,
-                    "message": f"📝 New thread created: {thread_name}"
+                    "message": f"ðŸ“ New thread created: {thread_name}"
                 })
             
             # Handle thread loading
@@ -396,7 +409,7 @@ async def websocket_architecture_endpoint(
                     "memory_context": memory_context,
                     "conversations": conversation_memory,
                     "latest_diagram": latest_diagram,
-                    "message": f"🔄 Loaded thread with {len(conversation_memory)} previous versions"
+                    "message": f"ðŸ”„ Loaded thread with {len(conversation_memory)} previous versions"
                 })
             
             # ============= NEW: DRAG MESSAGE TYPE =============
@@ -421,7 +434,7 @@ async def websocket_architecture_endpoint(
                 
                 diagram_json = data.get("diagram", {})
                 
-                logger.info(f"🖱️ Processing drag update for thread {current_thread_id}")
+                logger.info(f"ðŸ–±ï¸ Processing drag update for thread {current_thread_id}")
                 logger.info(f"   - Nodes: {len(diagram_json.get('nodes', []))}")
                 logger.info(f"   - Edges: {len(diagram_json.get('edges', []))}")
                 
@@ -453,7 +466,7 @@ async def websocket_architecture_endpoint(
                     db.commit()
                     db.refresh(latest_conversation)
                     
-                    logger.info(f"✅ Updated conversation {latest_conversation.conversation_id} via drag")
+                    logger.info(f"âœ… Updated conversation {latest_conversation.conversation_id} via drag")
                     
                     # Update the conversation_memory list with the new diagram
                     if conversation_memory:
@@ -475,14 +488,14 @@ async def websocket_architecture_endpoint(
                         current_memory.chat_memory.add_ai_message(summary)
                         
                         messages = current_memory.chat_memory.messages
-                        logger.info(f"   📝 Memory now has {len(messages)} total messages")
+                        logger.info(f"   ðŸ“ Memory now has {len(messages)} total messages")
                     
                     # Send success response
                     await manager.send_message(client_id, {
                         "type": "diagram_drag_updated",
                         "version": current_version_num,
                         "diagram": diagram_json,
-                        "message": f"✅ Diagram updated via drag in version {current_version_num}",
+                        "message": f"âœ… Diagram updated via drag in version {current_version_num}",
                         "metadata": {
                             "node_count": node_count,
                             "edge_count": edge_count,
@@ -491,7 +504,7 @@ async def websocket_architecture_endpoint(
                     })
                     
                 except Exception as e:
-                    logger.error(f"❌ Drag update error: {str(e)}", exc_info=True)
+                    logger.error(f"âŒ Drag update error: {str(e)}", exc_info=True)
                     db.rollback()
                     await manager.send_message(client_id, {
                         "type": "error",
@@ -518,20 +531,20 @@ async def websocket_architecture_endpoint(
                 
                 await manager.send_message(client_id, {
                     "type": "processing",
-                    "message": "🔧 Modifying your diagram with AI context..."
+                    "message": "ðŸ”§ Modifying your diagram with AI context..."
                 })
                 
                 try:
                     # Get current diagram from conversation_memory (NOT from LangChain memory!)
                     current_diagram = get_latest_diagram(conversation_memory)
                     
-                    logger.info(f"🔧 Starting modification request: '{modification_request}'")
-                    logger.info(f"📊 Current diagram state:")
+                    logger.info(f"ðŸ”§ Starting modification request: '{modification_request}'")
+                    logger.info(f"ðŸ“Š Current diagram state:")
                     logger.info(f"   - Nodes: {len(current_diagram.get('nodes', []))}")
                     for node in current_diagram.get('nodes', []):
-                        logger.info(f"      • {node['id']}: {node.get('data', {}).get('label', 'No label')}")
+                        logger.info(f"      â€¢ {node['id']}: {node.get('data', {}).get('label', 'No label')}")
                     logger.info(f"   - Edges: {len(current_diagram.get('edges', []))}")
-                    logger.info(f"📚 Conversation history: {len(conversation_memory)} versions")
+                    logger.info(f"ðŸ“š Conversation history: {len(conversation_memory)} versions")
                     
                     # Prepare history for modifier (with position preservation)
                     history_for_modifier = prepare_conversation_history_for_modifier(conversation_memory)
@@ -544,10 +557,10 @@ async def websocket_architecture_endpoint(
                         available_icons=AVAILABLE_ICONS
                     )
                     
-                    logger.info(f"📊 Modified diagram state:")
+                    logger.info(f"ðŸ“Š Modified diagram state:")
                     logger.info(f"   - Nodes: {len(modified_diagram.get('nodes', []))}")
                     for node in modified_diagram.get('nodes', []):
-                        logger.info(f"      • {node['id']}: {node.get('data', {}).get('label', 'No label')}")
+                        logger.info(f"      â€¢ {node['id']}: {node.get('data', {}).get('label', 'No label')}")
                     logger.info(f"   - Edges: {len(modified_diagram.get('edges', []))}")
                     
                     # Get modification summary
@@ -557,7 +570,7 @@ async def websocket_architecture_endpoint(
                     )
                     
                     # Log the modification for debugging
-                    logger.info(f"📝 Modification summary: {modification_summary}")
+                    logger.info(f"ðŸ“ Modification summary: {modification_summary}")
                     if modification_summary.get("updated_details"):
                         diagram_type = modification_summary.get("diagram_type", "architecture")
                         for detail in modification_summary["updated_details"]:
@@ -572,7 +585,7 @@ async def websocket_architecture_endpoint(
                                     logger.info(f"   Table '{table_name}': Removed fields {fields_removed}")
                             else:
                                 # Architecture diagram updates
-                                logger.info(f"   Updated: '{detail.get('old', 'N/A')}' → '{detail.get('new', 'N/A')}'")
+                                logger.info(f"   Updated: '{detail.get('old', 'N/A')}' â†’ '{detail.get('new', 'N/A')}'")
                     
                     # Validate metadata before saving
                     if "metadata" not in modified_diagram:
@@ -631,7 +644,7 @@ async def websocket_architecture_endpoint(
                             "edge_count": len(modified_diagram.get("edges", [])),
                             "is_modification": True
                         },
-                        "message": f"✅ Diagram modified! Version {current_version - 1}"
+                        "message": f"âœ… Diagram modified! Version {current_version - 1}"
                     })
                 
                 except Exception as e:
@@ -655,7 +668,7 @@ async def websocket_architecture_endpoint(
                 
                 await manager.send_message(client_id, {
                     "type": "processing",
-                    "message": "🔍 Analyzing your project..."
+                    "message": "ðŸ” Analyzing your project..."
                 })
                 
                 context = analyzer_service.analyze_context(description)
@@ -672,6 +685,21 @@ async def websocket_architecture_endpoint(
                 
                 if needs_clarification:
                     questions = analyzer_service.generate_questions(context, completeness)
+                    if not questions:
+                        failure_type = getattr(analyzer_service, "last_question_generation_status", "unknown")
+                        failure_error = getattr(analyzer_service, "last_question_generation_error", "No clarification questions were returned")
+                        raw_response = getattr(analyzer_service, "last_question_generation_raw_response", None)
+                        print(f"[websocket_endpoints] clarification generation failed for {client_id}: {failure_type} - {failure_error}", flush=True)
+                        if raw_response is not None:
+                            print(f"[websocket_endpoints] raw LLM response for {client_id}: {raw_response!r}", flush=True)
+                        await manager.send_message(client_id, {
+                            "type": "error",
+                            "error_type": failure_type,
+                            "message": "The LLM did not return clarification questions.",
+                            "details": failure_error,
+                            "raw_response": raw_response,
+                        })
+                        continue
                     current_analysis["clarification_questions"] = questions
                     awaiting_clarification = True
                     clarification_responses = {}
@@ -680,12 +708,12 @@ async def websocket_architecture_endpoint(
                         "type": "clarification_needed",
                         "analysis": current_analysis,
                         "questions": questions,
-                        "message": f"🎯 I need some clarifications (Completeness: {int(completeness*100)}%)"
+                        "message": f"ðŸŽ¯ I need some clarifications (Completeness: {int(completeness*100)}%)"
                     })
                 else:
                     await manager.send_message(client_id, {
                         "type": "generating",
-                        "message": "🎨 Generating your diagram..."
+                        "message": "ðŸŽ¨ Generating your diagram..."
                     })
                     
                     if diagram_type == "db_diagram":
@@ -767,7 +795,7 @@ async def websocket_architecture_endpoint(
                             "edge_count": len(diagram_data.get("edges", [])),
                             "diagram_type": diagram_type
                         },
-                        "message": f"✅ Diagram generated! Version {current_version - 1}"
+                        "message": f"âœ… Diagram generated! Version {current_version - 1}"
                     })
             
             # Handle clarification response
@@ -790,7 +818,7 @@ async def websocket_architecture_endpoint(
                     
                     await manager.send_message(client_id, {
                         "type": "generating",
-                        "message": "🎨 All clarifications received! Generating..."
+                        "message": "ðŸŽ¨ All clarifications received! Generating..."
                     })
                     
                     diagram_type = current_analysis.get("diagram_type", "architecture")
@@ -879,7 +907,7 @@ async def websocket_architecture_endpoint(
                             "edge_count": len(diagram_data.get("edges", [])),
                             "diagram_type": diagram_type
                         },
-                        "message": f"✅ Diagram generated! Version {current_version - 1}"
+                        "message": f"âœ… Diagram generated! Version {current_version - 1}"
                     })
                 else:
                     next_question = questions[len(clarification_responses)]
@@ -890,7 +918,7 @@ async def websocket_architecture_endpoint(
                             "current": len(clarification_responses) + 1,
                             "total": len(questions)
                         },
-                        "message": f"💡 Question {len(clarification_responses) + 1}/{len(questions)}"
+                        "message": f"ðŸ’¡ Question {len(clarification_responses) + 1}/{len(questions)}"
                     })
             
             elif message_type == "ping":
@@ -905,11 +933,12 @@ async def websocket_architecture_endpoint(
     
     except Exception as e:
         logger.error(f"WebSocket error for client {client_id}: {str(e)}", exc_info=True)
+        print(f"[websocket_endpoints] websocket error for {client_id}: {type(e).__name__}: {e}", flush=True)
         try:
             await manager.send_message(client_id, {
                 "type": "error",
                 "message": f"Server error: {str(e)}"
             })
-        except:
+        except Exception:
             pass
         manager.disconnect(client_id)

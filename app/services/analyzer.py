@@ -1,10 +1,13 @@
 import json
 import re
+import logging
 from typing import Dict, List, Any
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from dotenv import load_dotenv
 import os
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -13,10 +16,15 @@ google_api_key = os.getenv("GOOGLE_API_KEY")
 if not google_api_key:
     raise ValueError("GOOGLE_API_KEY environment variable not set")
 os.environ["GOOGLE_API_KEY"] = google_api_key
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.7, max_tokens=4000)
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.3, max_tokens=1024)
 
 class ArchitectureAnalyzer:
     """Core analyzer for extracting context from project descriptions"""
+
+    def __init__(self):
+        self.last_question_generation_status = None
+        self.last_question_generation_error = None
+        self.last_question_generation_raw_response = None
 
     def analyze_context(self, prompt: str) -> Dict[str, Any]:
         """Extract structured context from user prompt"""
@@ -60,12 +68,19 @@ class ArchitectureAnalyzer:
         """
         
         try:
+            print("[analyzer] invoking analyze_context LLM", flush=True)
             response = llm.invoke([HumanMessage(content=analysis_prompt)])
+            logger.info("LLM analyze_context response: %s", response.content)
+            print(f"[analyzer] analyze_context raw response: {response.content!r}", flush=True)
             json_match = re.search(r'\{.*\}', response.content, re.DOTALL)
             if json_match:
+                print("[analyzer] analyze_context parsed JSON successfully", flush=True)
                 return json.loads(json_match.group())
+            logger.warning("analyze_context LLM response did not contain parseable JSON")
+            print("[analyzer] analyze_context parse failed: no JSON object found", flush=True)
         except Exception as e:
-            print(f"Context analysis error: {e}")
+            logger.exception("Context analysis error: %s", e)
+            print(f"[analyzer] analyze_context error: {type(e).__name__}: {e}", flush=True)
         
         return {
             "project_domain": "web application",
@@ -107,18 +122,30 @@ class ArchitectureAnalyzer:
         Return a JSON array of questions: ["question1", "question2", ...]
         """
         
+        self.last_question_generation_status = "started"
+        self.last_question_generation_error = None
+        self.last_question_generation_raw_response = None
+
         try:
+            print("[analyzer] invoking generate_questions LLM", flush=True)
             response = llm.invoke([HumanMessage(content=questions_prompt)])
-            json_match = re.search(r'\[.*\]', response.content, re.DOTALL)
+            logger.info("LLM generate_questions response: %s", response.content)
+            self.last_question_generation_raw_response = response.content
+            print(f"[analyzer] generate_questions raw response: {response.content!r}", flush=True)
+            json_match = re.search(r"\[.*\]", response.content, re.DOTALL)
             if json_match:
+                print("[analyzer] generate_questions parsed JSON successfully", flush=True)
+                self.last_question_generation_status = "success"
                 return json.loads(json_match.group())
+            logger.warning("generate_questions LLM response did not contain parseable JSON")
+            self.last_question_generation_status = "parse_failed"
+            self.last_question_generation_error = "LLM response did not contain a JSON array"
+            print("[analyzer] generate_questions parse failed: no JSON array found", flush=True)
         except Exception as e:
-            print(f"Question generation error: {e}")
+            logger.exception("Question generation error: %s", e)
+            self.last_question_generation_status = "llm_exception"
+            self.last_question_generation_error = f"{type(e).__name__}: {e}"
+            print(f"[analyzer] generate_questions error: {type(e).__name__}: {e}", flush=True)
         
-        return [
-            f"What are the key functional requirements for your {domain}?",
-            "What is the expected user scale and performance requirements?",
-            "Do you have specific technology preferences or constraints?",
-            "What external systems need integration?",
-            "What are your deployment and infrastructure preferences?"
-        ]
+        print("[analyzer] returning no clarification questions because LLM failed", flush=True)
+        return []

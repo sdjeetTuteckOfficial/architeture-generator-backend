@@ -1,19 +1,34 @@
-# app/main.py (Updated)
+import warnings
+import logging
+import sys
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+    force=True,
+)
+
+logger = logging.getLogger(__name__)
+logger.info("Terminal logging initialized")
+print("[startup] app.main imported and logging initialized", flush=True)
+
+def terminal_boot_message():
+    print("[startup] FastAPI app is starting", flush=True)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
 from app.api import endpoints, auth, websocket_endpoints
-from app.database import Base, engine
 from app.core.config import settings
 
-Base.metadata.create_all(bind=engine)
-
-# Initialize FastAPI app
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.PROJECT_VERSION,
 )
 
-# CORS setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
@@ -22,12 +37,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include API routers
 app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
-app.include_router(endpoints.router)  # This now includes protected /architecture routes
-app.include_router(websocket_endpoints.router, tags=["WebSocket"]) 
+app.include_router(endpoints.router)
+app.include_router(websocket_endpoints.router, tags=["WebSocket"])
 
-# Root endpoint (public)
+
+@app.on_event("startup")
+async def on_startup():
+    terminal_boot_message()
+    logger.info("FastAPI startup event fired")
+
 @app.get("/")
 async def root():
     return {
@@ -47,10 +66,10 @@ async def root():
             "/architecture/generate-text-architecture",
             "/architecture/threads",
             "/architecture/conversations",
-        ]
+        ],
     }
 
-# Health check endpoint (public)
+
 @app.get("/health")
 async def health_check():
     return {
@@ -58,8 +77,9 @@ async def health_check():
         "version": settings.PROJECT_VERSION,
     }
 
-# Icons endpoint (public)
+
 @app.get("/icons")
 async def get_available_icons():
     """Return list of available icons for frontend"""
     return {"icons": settings.AVAILABLE_ICONS}
+

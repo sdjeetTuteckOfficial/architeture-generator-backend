@@ -117,7 +117,7 @@ class DiagramModificationRequest(BaseModel):
     diagram: Dict[str, Any]
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "thread_id": "550e8400-e29b-41d4-a716-446655440000",
                 "diagram": {
@@ -151,7 +151,7 @@ class DiagramUpdateRequest(BaseModel):
     diagram: Dict[str, Any]
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "thread_id": "550e8400-e29b-41d4-a716-446655440000",
                 "diagram": {
